@@ -1,0 +1,23 @@
+    input_size: 4  # 3 point dimensions + 1 information dimension
+    pose_size: 12  # 3x4 transformation matrix
+    hidden_size: 512  # Hidden size for the LSTM
+    info_size: 12  # General Embedding size (shared)
+    sequence_length: 16
+    batch_size: 128
+    num_epochs: 1000
+    num_layers: 1
+    lr: 0.002
+    # Muon optimizer parameters
+    muon_lr: 0.02  # Learning rate for Muon optimizer (RNN weights)
+    muon_weight_decay: 1e-5  # Weight decay for Muon optimizer
+    adamw_lr: 1e-3  # Learning rate for AdamW optimizer (other parameters)
+    adamw_betas: [0.9, 0.95]  # Betas for AdamW optimizer
+    adamw_weight_decay: 1e-5  # Weight decay for AdamW optimizer
+    rot_scale: 1.0 # Rotation scale for the quaternion
+    is_ablation: False
+    save_dir_euler: '/cluster/home/fanyang1/projects/mamba_memory'
+    save_dir_local: '.'
+    load_pretrain: False
+    save_pretrain: True
+    task_name: 'min-lstm'
+    pretrain_type: 'regression'
