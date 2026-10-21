@@ -38,7 +38,16 @@ class OnPolicyRunner:
         # Video recording (initialized lazily, enabled via set_video_recording)
         self.video_recorder: VideoRecorder | None = None
 
-        obs, extras = self.env.get_observations()
+        obs_result = self.env.get_observations()
+        if isinstance(obs_result, tuple):
+            obs, extras = obs_result
+        elif hasattr(obs_result, "keys"):
+            obs = obs_result["policy"]
+            extras = {"observations": obs_result}
+        else:
+            obs = obs_result
+            extras = {"observations": {}}
+
         num_obs = obs.shape[1]
         if "critic" in extras["observations"]:
             num_critic_obs = extras["observations"]["critic"].shape[1]
@@ -127,7 +136,16 @@ class OnPolicyRunner:
             self.env.episode_length_buf = torch.randint_like(
                 self.env.episode_length_buf, high=int(self.env.max_episode_length)
             )
-        obs, extras = self.env.get_observations()
+        obs_result = self.env.get_observations()
+        if isinstance(obs_result, tuple):
+            obs, extras = obs_result
+        elif hasattr(obs_result, "keys"):
+            obs = obs_result["policy"]
+            extras = {"observations": obs_result}
+        else:
+            obs = obs_result
+            extras = {"observations": {}}
+
         critic_obs = extras["observations"].get("critic", obs)
         obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
         self.train_mode()
@@ -160,6 +178,10 @@ class OnPolicyRunner:
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
                     obs, rewards, dones, infos = self.env.step(actions)
+                    if hasattr(obs, "keys"):
+                        if "observations" not in infos:
+                            infos["observations"] = obs
+                        obs = obs["policy"]
 
                     # Capture video frame if recording
                     # Continue capturing until video_length is reached
@@ -386,11 +408,17 @@ class OnPolicyRunner:
 
         if device is not None:
             actor_critic.to(device)
-        policy = actor_critic.act_inference
-        if self.cfg["empirical_normalization"]:
-            if device is not None:
+            if self.cfg["empirical_normalization"]:
                 self.obs_normalizer.to(device)
-            policy = lambda x: actor_critic.act_inference(self.obs_normalizer(x))  # noqa: E731
+
+        def policy(obs):
+            if hasattr(obs, "keys"):
+                obs = obs["policy"]
+            if self.cfg["empirical_normalization"]:
+                obs = self.obs_normalizer(obs)
+            return actor_critic.act_inference(obs)
+
+        policy.reset = actor_critic.reset
         return policy
 
     def get_policy_reset(self, device=None):

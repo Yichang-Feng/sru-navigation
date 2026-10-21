@@ -802,15 +802,22 @@ class MemorySRU(torch.nn.Module):
         num_done = done_indices.size(0)
         batch_size = dones.size(0)
 
-        for hidden_state in self.hidden_states:
-            if use_random_init:
+        is_tuple = isinstance(self.hidden_states, (tuple, list))
+        states = list(self.hidden_states) if is_tuple else [self.hidden_states]
+        new_states = []
+
+        for hidden_state in states:
+            h = hidden_state.clone()
+            if self.training and use_random_init:
                 # Sample random indices from entire batch (preserves original semantics)
-                random_indices = torch.randint(0, batch_size, (num_done,), device=hidden_state.device)
-                # Clone only the selected states to avoid in-place modification issues
-                hidden_state[..., done_indices, :] = hidden_state[..., random_indices, :].clone()
+                random_indices = torch.randint(0, batch_size, (num_done,), device=h.device)
+                h[..., done_indices, :] = h[..., random_indices, :]
             else:
-                # Use zero initialization
-                hidden_state[..., done_indices, :] = 0.0
+                # Use zero initialization during eval or when random init is disabled
+                h[..., done_indices, :] = 0.0
+            new_states.append(h)
+
+        self.hidden_states = tuple(new_states) if is_tuple else new_states[0]
 
 
 class SimpleConsistentDropout(nn.Module):
