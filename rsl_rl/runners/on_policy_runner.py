@@ -265,6 +265,8 @@ class OnPolicyRunner:
                     for path in git_file_paths:
                         self.writer.save_file(path)
 
+        if self.current_learning_iteration == tot_iter - 1:
+            self.current_learning_iteration = tot_iter
         self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
@@ -306,6 +308,10 @@ class OnPolicyRunner:
         if self.is_mdpo and locs["mean_kl_divergence"] is not None:
             self.writer.add_scalar("Loss/kl_divergence", locs["mean_kl_divergence"], locs["it"])
         self.writer.add_scalar("Loss/learning_rate", self.alg.learning_rate, locs["it"])
+        if hasattr(self.alg, "entropy_coef"):
+            self.writer.add_scalar("Loss/entropy_coef", self.alg.entropy_coef, locs["it"])
+        if hasattr(self.alg, "clip_param"):
+            self.writer.add_scalar("Loss/clip_param", self.alg.clip_param, locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
         self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
@@ -386,17 +392,25 @@ class OnPolicyRunner:
         if self.is_mdpo:
             self.alg.actor_critic_1.load_state_dict(loaded_dict["model_state_dict"], strict=True)
             self.alg.actor_critic_2.load_state_dict(loaded_dict["model_state_dict"], strict=True)
-            if load_optimizer:
-                self.alg.optimizer_1.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if load_optimizer and "optimizer_state_dict" in loaded_dict:
+                try:
+                    self.alg.optimizer_1.load_state_dict(loaded_dict["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[WARNING] Could not load optimizer state dict: {e}. Skipping optimizer state loading.")
         else:
             self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"], strict=True)
-            if load_optimizer:
-                self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if load_optimizer and "optimizer_state_dict" in loaded_dict:
+                try:
+                    self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[WARNING] Could not load optimizer state dict: {e}. Skipping optimizer state loading.")
         if self.empirical_normalization:
-            self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
-            self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
-        self.current_learning_iteration = loaded_dict["iter"]
-        return loaded_dict["infos"]
+            if "obs_norm_state_dict" in loaded_dict:
+                self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
+            if "critic_obs_norm_state_dict" in loaded_dict:
+                self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
+        self.current_learning_iteration = loaded_dict.get("iter", 0)
+        return loaded_dict.get("infos", None)
 
     def get_inference_policy(self, device=None):
         """Get the inference policy function."""

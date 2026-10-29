@@ -354,7 +354,8 @@ class ActorCriticSRU(nn.Module):
     def update_distribution(self, combined_features):
         """Update the action distribution based on actor output."""
         mean = self.actor(combined_features)
-        std = self.log_std.exp().expand_as(mean)
+        log_std = torch.clamp(self.log_std, min=-2.5, max=0.2)
+        std = log_std.exp().expand_as(mean)
         self.distribution = Normal(mean, std)
 
     def act(self, observations, masks=None, hidden_states=None, dropout_masks=None):

@@ -11,6 +11,7 @@ exploration and sample efficiency.
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -151,6 +152,21 @@ class MDPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+
+        # Dynamic entropy annealing configuration (hold for 200 iters, then smoothly decay)
+        self.initial_entropy_coef = entropy_coef
+        self.min_entropy_coef = float(os.environ.get("MDPO_MIN_ENTROPY_COEF", kwargs.get("min_entropy_coef", 0.0005)))
+        self.entropy_hold_iters = int(os.environ.get("MDPO_ENTROPY_HOLD_ITERS", kwargs.get("entropy_hold_iters", 200)))
+        self.entropy_decay_span = int(os.environ.get("MDPO_ENTROPY_DECAY_SPAN", kwargs.get("entropy_decay_span", 600)))
+        self.entropy_schedule = os.environ.get("MDPO_ENTROPY_SCHEDULE", kwargs.get("entropy_schedule", "cosine"))
+
+        # Dynamic clip_param annealing configuration (0.20 -> 0.15 smoothly)
+        self.initial_clip_param = clip_param
+        self.min_clip_param = float(os.environ.get("MDPO_MIN_CLIP_PARAM", kwargs.get("min_clip_param", 0.15)))
+        self.clip_schedule = os.environ.get("MDPO_CLIP_SCHEDULE", kwargs.get("clip_schedule", "cosine"))
+        self._run_start_iteration: int | None = None
+
+        print(f"[MDPO] Annealing enabled: entropy=[{self.initial_entropy_coef} -> {self.min_entropy_coef}], clip=[{self.initial_clip_param} -> {self.min_clip_param}], lr_schedule={self.schedule}")
 
     def _create_optimizer(
         self, actor_critic: "ActorCritic", learning_rate: float, use_muon: bool
@@ -347,23 +363,28 @@ class MDPO:
         self.actor_critic_2.reset_dropout_masks()
 
     def _update_learning_rate(self, iteration: int, max_iterations: int):
-        """Update learning rate based on schedule."""
-        if self.schedule == "fixed":
+        """Update learning rate based on schedule, relative to the current run's start iteration."""
+        if self.schedule in ("fixed", "adaptive"):
             return
-        elif self.schedule == "linear":
-            # Linear decay to min_lr over first 33% of training
-            progress = iteration / (max_iterations * 0.33)
-            if progress < 1.0:
-                self.learning_rate = self.max_learning_rate - progress * (
-                    self.max_learning_rate - self.min_learning_rate
-                )
-            else:
-                self.learning_rate = self.min_learning_rate
+
+        if not hasattr(self, "_run_start_iteration") or self._run_start_iteration is None:
+            self._run_start_iteration = iteration
+
+        run_span = max(max_iterations - self._run_start_iteration, 1)
+        run_rel_it = max(iteration - self._run_start_iteration, 0)
+        progress = min(max(run_rel_it / run_span, 0.0), 1.0)
+
+        if self.schedule == "linear":
+            # Linear decay to min_lr over first 33% of run
+            linear_prog = min(max(progress / 0.33, 0.0), 1.0)
+            self.learning_rate = self.max_learning_rate - linear_prog * (
+                self.max_learning_rate - self.min_learning_rate
+            )
         elif self.schedule == "cosine":
-            progress = iteration / max_iterations
-            self.learning_rate = 0.5 * self.max_learning_rate * (1.0 + math.cos(math.pi * progress))
+            self.learning_rate = self.min_learning_rate + 0.5 * (
+                self.max_learning_rate - self.min_learning_rate
+            ) * (1.0 + math.cos(math.pi * progress))
         elif self.schedule == "exponential":
-            progress = iteration / max_iterations
             decay_rate = 5.0
             self.learning_rate = self.min_learning_rate + (
                 self.max_learning_rate - self.min_learning_rate
@@ -374,6 +395,70 @@ class MDPO:
             param_group["lr"] = self.learning_rate
         for param_group in self.optimizer_2.param_groups:
             param_group["lr"] = self.learning_rate
+
+    def _update_entropy_coef(self, iteration: int, max_iterations: int):
+        """Update entropy coefficient dynamically with warmup hold and annealing, relative to run start.
+
+        Maintains initial_entropy_coef for the first `entropy_hold_iters`,
+        then smoothly anneals towards `min_entropy_coef` over `entropy_decay_span` (or remaining span).
+        """
+        if self.entropy_schedule == "fixed" or self.initial_entropy_coef <= 0.0:
+            return
+
+        if not hasattr(self, "_run_start_iteration") or self._run_start_iteration is None:
+            self._run_start_iteration = iteration
+
+        run_span = max(max_iterations - self._run_start_iteration, 1)
+        run_rel_it = max(iteration - self._run_start_iteration, 0)
+
+        if run_rel_it <= self.entropy_hold_iters:
+            self.entropy_coef = self.initial_entropy_coef
+            return
+
+        decay_span = self.entropy_decay_span if self.entropy_decay_span > 0 else max(run_span - self.entropy_hold_iters, 1)
+        decay_progress = min(max((run_rel_it - self.entropy_hold_iters) / max(decay_span, 1), 0.0), 1.0)
+
+        if self.entropy_schedule == "linear":
+            self.entropy_coef = self.min_entropy_coef + (
+                self.initial_entropy_coef - self.min_entropy_coef
+            ) * (1.0 - decay_progress)
+        elif self.entropy_schedule == "exponential":
+            decay_rate = 3.0
+            self.entropy_coef = self.min_entropy_coef + (
+                self.initial_entropy_coef - self.min_entropy_coef
+            ) * math.exp(-decay_rate * decay_progress)
+        elif self.entropy_schedule == "cosine":
+            self.entropy_coef = self.min_entropy_coef + (
+                self.initial_entropy_coef - self.min_entropy_coef
+            ) * 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+
+    def _update_clip_param(self, iteration: int, max_iterations: int):
+        """Update PPO clip parameter dynamically with smooth annealing, relative to run start."""
+        if self.clip_schedule == "fixed" or self.initial_clip_param == self.min_clip_param:
+            return
+
+        if not hasattr(self, "_run_start_iteration") or self._run_start_iteration is None:
+            self._run_start_iteration = iteration
+
+        run_span = max(max_iterations - self._run_start_iteration, 1)
+        run_rel_it = max(iteration - self._run_start_iteration, 0)
+        progress = min(max(run_rel_it / run_span, 0.0), 1.0)
+
+        if self.clip_schedule == "cosine":
+            self.clip_param = self.min_clip_param + (
+                self.initial_clip_param - self.min_clip_param
+            ) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        elif self.clip_schedule == "linear":
+            self.clip_param = self.min_clip_param + (
+                self.initial_clip_param - self.min_clip_param
+            ) * (1.0 - progress)
+        elif self.clip_schedule == "exponential":
+            decay_rate = 3.0
+            self.clip_param = self.min_clip_param + (
+                self.initial_clip_param - self.min_clip_param
+            ) * math.exp(-decay_rate * progress)
+
+        self.value_clip_param = self.clip_param
 
     def _compute_ppo_loss(
         self,
@@ -423,8 +508,10 @@ class MDPO:
         mean_surrogate_loss = 0.0
         mean_kl_divergence = 0.0
 
-        # Update learning rate
+        # Update learning rate, dynamic entropy coefficient, and clip parameter
         self._update_learning_rate(iteration, max_iterations)
+        self._update_entropy_coef(iteration, max_iterations)
+        self._update_clip_param(iteration, max_iterations)
 
         # Get mini-batch generators
         if self.actor_critic_1.is_recurrent:
@@ -546,6 +633,18 @@ class MDPO:
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_kl_divergence /= num_updates
+
+        # Adaptive learning rate adjustment based on KL divergence
+        if self.desired_kl is not None and self.schedule == "adaptive":
+            if mean_kl_divergence > self.desired_kl * 2.0:
+                self.learning_rate = max(self.min_learning_rate, self.learning_rate / 1.5)
+            elif mean_kl_divergence < self.desired_kl / 2.0 and mean_kl_divergence > 0.0:
+                self.learning_rate = min(self.max_learning_rate, self.learning_rate * 1.5)
+
+            for param_group in self.optimizer_1.param_groups:
+                param_group["lr"] = self.learning_rate
+            for param_group in self.optimizer_2.param_groups:
+                param_group["lr"] = self.learning_rate
 
         # Clear rollouts
         self.storage_1.clear()

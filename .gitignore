@@ -68,3 +68,18 @@ temp/
 # Third-party / Environments
 IsaacLab/
 sru_nav_learning/
+
+# Benchmark evaluation outputs
+benchmark_results/
+
+# Handover and internal documentation
+AGENT_HANDOVER.md
+GO2W_ROBOT_DEPLOYMENT_HANDOVER.md
+GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md
+docs/AGENT_HANDOVER.md
+docs/BENCHMARK_AND_DEADZONE_TEST_GUIDE.md
+docs/CLI_REFERENCE.md
+docs/POLICY_BENCHMARK_AND_COMPARISON_GUIDE.md
+docs/TENSORBOARD_METRICS_GUIDE.md
+docs/go2w_nav_refactor_plan.md
+scripts/benchmark/README.md
