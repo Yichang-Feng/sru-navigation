@@ -226,7 +226,8 @@ def make_pillar(
     """Generate a centered pillar obstacle."""
     grid = np.zeros((size, size), dtype=np.int16)
     h = int(wall_height * scale) * (-1 if is_pit else 1)
-    grid[thickness:size-thickness, thickness:size-thickness] = h
+    t = min(thickness, max(1, size // 2 - 1))
+    grid[t:size-t, t:size-t] = h
     return grid
 
 
@@ -242,7 +243,8 @@ def make_bar(
     grid = np.zeros((size, size), dtype=np.int16)
     center = size // 2
     h = int(wall_height * scale)
-    grid[center - thickness//2:center + thickness//2, :] = h
+    t = min(thickness, max(1, size // 2 - 1))
+    grid[center - t//2:center + t//2, :] = h
 
     angle = rng.uniform(-180, 180)
     grid = rotate(grid, angle, reshape=False, order=1).astype(np.int16)
@@ -264,8 +266,9 @@ def make_cross(
     grid = np.zeros((size, size), dtype=np.int16)
     center = size // 2
     h = int(wall_height * scale)
-    grid[center - thickness//2:center + thickness//2, :] = h
-    grid[:, center - thickness//2:center + thickness//2] = h
+    t = min(thickness, max(1, size // 2 - 1))
+    grid[center - t//2:center + t//2, :] = h
+    grid[:, center - t//2:center + t//2] = h
 
     angle = rng.uniform(-180, 180)
     grid = rotate(grid, angle, reshape=False, order=1).astype(np.int16)
@@ -286,9 +289,10 @@ def make_shifted_block(
     """Generate a randomly shifted block."""
     grid = np.zeros((size, size), dtype=np.int16)
     h = int(wall_height * scale)
-    grid[thickness:size-thickness, thickness:size-thickness] = h
+    t = min(thickness, max(1, size // 2 - 1))
+    grid[t:size-t, t:size-t] = h
 
-    room = size // 2 - thickness
+    room = max(0, size // 2 - t)
     shift_amt = (
         rng.integers(-room, room + 1),
         rng.integers(-room, room + 1)
@@ -443,7 +447,11 @@ def maze_terrain(difficulty: float, cfg: "hf_terrains_maze_cfg.HfMazeTerrainCfg"
 
     # Setup dimensions
     cell_pixels = int(cfg.cell_size / cfg.horizontal_scale)
-    wall_height = int(cfg.wall_height / cfg.vertical_scale)
+    if getattr(cfg, "wall_height_range", None) is not None:
+        wall_height_m = float(rng.uniform(cfg.wall_height_range[0], cfg.wall_height_range[1]))
+        wall_height = int(wall_height_m / cfg.vertical_scale)
+    else:
+        wall_height = int(cfg.wall_height / cfg.vertical_scale)
     terrain_w = int(cfg.size[0] / cfg.horizontal_scale)
     terrain_h = int(cfg.size[1] / cfg.horizontal_scale)
 

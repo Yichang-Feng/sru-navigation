@@ -124,3 +124,48 @@ class B2WNavPPORunnerDevCfg(B2WNavPPORunnerCfg):
         self.max_iterations = 300
         self.experiment_name = "b2w_navigation_ppo_dev"
         self.logger = "tensorboard"
+
+
+# =============================================================================
+# B2W Goal Heading Fine-Tuning Runners (Warm-Start)
+# =============================================================================
+
+@configclass
+class B2WNavMDPOHeadingRunnerCfg(B2WNavMDPORunnerCfg):
+    """MDPO runner configuration for B2W navigation heading fine-tuning."""
+
+    num_steps_per_env = 24
+    max_iterations = 800
+    save_interval = 50
+    experiment_name = "b2w_navigation_heading_mdpo"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.policy.init_noise_std = 0.35
+        self.policy.dropout = 0.0
+        self.algorithm.learning_rate = 1.5e-4
+        self.algorithm.clip_param = 0.10
+        self.algorithm.desired_kl = 0.005
+        self.algorithm.entropy_coef = 0.002
+        self.algorithm.schedule = "cosine"
+
+
+@configclass
+class B2WNavPPOHeadingRunnerCfg(B2WNavPPORunnerCfg):
+    """PPO runner configuration for B2W navigation heading fine-tuning."""
+
+    num_steps_per_env = 24
+    max_iterations = 800
+    save_interval = 50
+    experiment_name = "b2w_navigation_heading_ppo"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.policy.init_noise_std = 0.35
+        self.policy.dropout = 0.0
+        self.algorithm.learning_rate = 1.5e-4
+        self.algorithm.clip_param = 0.10
+        self.algorithm.desired_kl = 0.005
+        self.algorithm.entropy_coef = 0.002
+        self.algorithm.schedule = "cosine"
+

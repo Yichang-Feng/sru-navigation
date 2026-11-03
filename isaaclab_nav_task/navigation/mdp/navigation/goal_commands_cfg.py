@@ -32,3 +32,7 @@ class RobotNavigationGoalCommandCfg(CommandTermCfg):
     robot_to_goal_line_vis: bool = True
     """If true, visualize the line from the robot to the goal."""
 
+    goal_height_offset_range: tuple[float, float] = (0.2, 0.6)
+    """Min and max vertical offset for goal sampling in meters."""
+
+

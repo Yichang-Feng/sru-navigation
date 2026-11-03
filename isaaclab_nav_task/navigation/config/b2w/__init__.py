@@ -76,3 +76,27 @@ gym.register(
         "rsl_rl_cfg_entry_point": agents.rsl_rl_cfg.B2WNavPPORunnerDevCfg,
     },
 )
+
+######################################################################################
+# Heading Control Fine-Tuning Tasks
+
+gym.register(
+    id="Isaac-Nav-MDPO-B2W-Heading-v0",
+    entry_point="isaaclab_nav_task.navigation:NavigationEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": navigation_env_cfg.B2WNavigationEnvCfg_Heading,
+        "rsl_rl_cfg_entry_point": agents.rsl_rl_cfg.B2WNavMDPOHeadingRunnerCfg,
+    },
+)
+
+gym.register(
+    id="Isaac-Nav-PPO-B2W-Heading-v0",
+    entry_point="isaaclab_nav_task.navigation:NavigationEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": navigation_env_cfg.B2WNavigationEnvCfg_Heading,
+        "rsl_rl_cfg_entry_point": agents.rsl_rl_cfg.B2WNavPPOHeadingRunnerCfg,
+    },
+)
+

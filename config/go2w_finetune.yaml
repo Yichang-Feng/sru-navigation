@@ -1,0 +1,70 @@
+# ==============================================================================
+# Go2W 导航策略微调配置文件 (Go2W Navigation Fine-Tuning Configuration)
+# 作用：基于成熟预训练策略进行领域适应微调，内置 Critic 预热防遗忘机制
+# ==============================================================================
+
+# 1. 基础任务与预训练权重来源
+task:
+  # 强烈推荐微调使用 PPO (单策略 + 真实自适应 KL 控速，稳定性远优于 MDPO 双策略互蒸馏)
+  name: "Isaac-Nav-PPO-Go2W-v0"   # 也兼容 "Isaac-Nav-MDPO-Go2W-v0"
+  num_envs: 180                    # 仿真并行环境数 (与 180 块迷宫子地形 1:1 对应)
+  seed: 60
+
+# 预训练策略权重文件路径 (TorchScript JIT 部署模型)
+checkpoint:
+  pretrained_path: "/home/yichangfeng/sru-robot-deployment/rl_nav_controller/deployment_policies/nav_policy_new.pt"
+
+# 2. 强化学习微调超参数设计 (防崩溃核心设计)
+algorithm:
+  # 【核心保护机制】：Critic 预热轮数 (Critic Warm-up)
+  # 前 60 轮完全冻结预训练 Actor（不更新任何 Actor 权重），只训练全新的 Critic！
+  # 让 80% 成功率的专家 Actor 在 Go2W 环境中跑出高质量经验轨迹，使 Critic 快速准确拟合 V(s)。
+  # 彻底解决“随机 Critic 产生错误优势函数（Advantage）毒害专家 Actor”的根本痛点。
+  critic_warmup_iterations: 60
+
+  # 解冻后 Actor 采用微弱学习率轻柔微调，Critic 保持正常学习率
+  actor_learning_rate: 3.0e-5      # Actor 解冻后的微调学习率（极轻柔微调，保护先验记忆）
+  learning_rate: 2.0e-4            # Critic 学习率（快速跟踪状态价值）
+  min_learning_rate: 1.0e-6
+  schedule: "adaptive"             # PPO 自适应 KL 控速：KL > 0.02 时自动降低学习率
+  desired_kl: 0.01                 # 目标 KL 散度约束
+
+  # 探索熵正则权重：降至 0.0002（从零训练为 0.00375），防止盲目探索破坏已有避障能力
+  entropy_coef: 0.0002
+  
+  # 价值损失权重与 PPO 裁剪
+  value_loss_coef: 0.02
+  clip_param: 0.2
+  value_clip_param: 0.2
+  gamma: 0.999                     # 60秒长程导航折扣因子
+  lam: 0.95
+  max_grad_norm: 1.0
+  num_learning_epochs: 5
+  num_mini_batches: 4
+
+# 3. 策略网络参数
+policy:
+  init_noise_std: 0.25             # 保持低动作噪声（成熟策略工作点）
+  dropout: 0.0                     # 微调期关闭 dropout 保持确定性特征表达 (原 0.2)
+
+# 4. 训练周期与实验日志
+training:
+  max_iterations: 1500             # 预热 60 轮 + 微调约 1000 轮即可充分收敛
+  save_interval: 100               # 模型 Checkpoint 保存间隔 (轮次)
+  experiment_name: "go2w_navigation_finetune"
+  run_name: "warmup_ppo"
+  logger: "tensorboard"            # "tensorboard" 或 "wandb"
+
+# 5. 环境动力学与奖励项微调（针对 Go2W 矮机身与 16 自由度）
+environment:
+  rewards:
+    # 关节加速度惩罚权重：Go2W 有 16 个主动关节（比 8 关节多一倍），适当微调尺度
+    joint_acc_l2_weight: -5.0e-8    # 原默认 -1.0e-7，防止多关节对抖动惩罚过度敏感
+    action_rate_l1_weight: -0.1
+    # 目标软引导奖励触发概率 (默认 0.01，微调初期提高到 0.03 可加速引导矮视角狗切入目标)
+    reach_goal_soft_prob: 0.03
+
+  terrain:
+    curriculum: false
+    max_init_terrain_level: 10     # 保持在 10 级迷宫上微调适应
+    difficulty_range: [0.5, 1.0]

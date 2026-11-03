@@ -505,3 +505,27 @@ def time_normalized(env: ManagerBasedRLEnv, command_name: str = "robot_goal") ->
     else:
         t = torch.tensor([0.0]).repeat(env.num_envs, 1).to(env.device)
     return t / T_max
+
+
+def target_heading(
+    env: ManagerBasedRLEnv,
+    command_name: str = "robot_goal",
+) -> torch.Tensor:
+    """The relative target heading error in body frame, as [cos(Δψ), sin(Δψ)]."""
+    goal_cmd: RobotNavigationGoalCommand = env.command_manager.get_term(command_name)
+    cos_yaw = getattr(goal_cmd, "target_yaw_cos", torch.ones(env.num_envs, device=env.device))
+    sin_yaw = getattr(goal_cmd, "target_yaw_sin", torch.zeros(env.num_envs, device=env.device))
+    return torch.stack([cos_yaw, sin_yaw], dim=-1)
+
+
+def target_heading_delayed(
+    env: ManagerBasedRLEnv,
+    command_name: str = "robot_goal",
+) -> torch.Tensor:
+    """The relative target heading error in body frame, with delay applied."""
+    heading_vec = target_heading(env, command_name)
+    if hasattr(env, "delay_manager") and env.delay_manager is not None:
+        if hasattr(env.delay_manager, "compute_delayed_target_heading"):
+            return env.delay_manager.compute_delayed_target_heading(heading_vec)
+    return heading_vec
+

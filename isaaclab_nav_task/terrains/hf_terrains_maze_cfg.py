@@ -69,6 +69,9 @@ class HfMazeTerrainCfg(HfTerrainBaseCfg):
     wall_height: float = 1.5
     """Height of the walls (in meters). Defaults to 1.5."""
 
+    wall_height_range: Optional[tuple[float, float]] = None
+    """Optional range (min_m, max_m) for randomized wall height, e.g. (0.4, 0.8) for 40-80cm obstacles."""
+
     # =========================================================================
     # Terrain Features
     # =========================================================================

@@ -103,6 +103,27 @@ class RslRlPpoAlgorithmCfg:
     max_grad_norm: float = MISSING
     """The maximum gradient norm."""
 
+    min_learning_rate: float = 1e-5
+    """Minimum learning rate for scheduling."""
+
+    min_entropy_coef: float = 0.0005
+    """Minimum entropy coefficient for scheduling."""
+
+    min_clip_param: float = 0.15
+    """Minimum PPO clip parameter for scheduling."""
+
+    clip_schedule: str = "cosine"
+    """Schedule for PPO clip parameter ('fixed', 'linear', 'cosine', 'exponential')."""
+
+    entropy_schedule: str = "cosine"
+    """Schedule for entropy coefficient ('fixed', 'linear', 'cosine', 'exponential')."""
+
+    entropy_hold_iters: int = 200
+    """Initial iterations to hold entropy coefficient before annealing."""
+
+    entropy_decay_span: int = 600
+    """Iteration span over which entropy decays."""
+
 
 @configclass
 class RslRlOnPolicyRunnerCfg:

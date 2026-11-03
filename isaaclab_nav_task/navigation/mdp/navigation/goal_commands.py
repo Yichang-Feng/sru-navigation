@@ -370,6 +370,10 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.spawn_position_world[:, :2] = self.env.scene.env_origins[:, :2]
 
         self.spawn_heading_world = torch.zeros(self.num_envs, device=self.device)
+        self.goal_heading_world = torch.zeros(self.num_envs, device=self.device)
+        self.target_yaw_error = torch.zeros(self.num_envs, device=self.device)
+        self.target_yaw_cos = torch.ones(self.num_envs, device=self.device)
+        self.target_yaw_sin = torch.zeros(self.num_envs, device=self.device)
 
     def _init_tracking_buffers(self):
         """Initialize goal tracking buffers."""
@@ -529,8 +533,10 @@ class RobotNavigationGoalCommand(CommandTerm):
         # Update goal position
         self.goal_position_world[env_ids, 0] = terrain_origins[:, 0] + goal_x
         self.goal_position_world[env_ids, 1] = terrain_origins[:, 1] + goal_y
-        height_offset = torch.rand(len(env_ids), device=self.device) * 0.6 + 0.2
+        h_min, h_max = getattr(self.cfg, "goal_height_offset_range", (0.2, 0.6))
+        height_offset = torch.rand(len(env_ids), device=self.device) * (h_max - h_min) + h_min
         self.goal_position_world[env_ids, 2] = goal_z + height_offset
+        self.goal_heading_world[env_ids] = torch.rand(len(env_ids), device=self.device) * (2.0 * math.pi) - math.pi
 
         # Small spawn height offset to prevent clipping into terrain
         # Note: The robot's default_root_state already includes standing height (~0.5m)
@@ -581,6 +587,14 @@ class RobotNavigationGoalCommand(CommandTerm):
 
         self.goal_command_body[:, :3] = direction
         self.goal_command_body[:, 3:] = log_distance
+
+        # Relative heading in robot body frame
+        q = self.robot.data.root_quat_w
+        robot_yaw = torch.atan2(2.0 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1.0 - 2.0 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        yaw_err = (self.goal_heading_world - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
+        self.target_yaw_error = yaw_err
+        self.target_yaw_cos = torch.cos(yaw_err)
+        self.target_yaw_sin = torch.sin(yaw_err)
 
         self._update_distance_tracking()
 
@@ -672,56 +686,70 @@ class RobotNavigationGoalCommand(CommandTerm):
         if not hasattr(self, "goal_marker"):
             cfg = CUBOID_MARKER_CFG.copy()
             cfg.prim_path = "/Visuals/Command/goal_position"
-            cfg.markers["cuboid"].size = (0.2, 0.2, 0.2)
-            cfg.markers["cuboid"].visual_material.diffuse_color = (0.0, 0.0, 1.0)
+            cfg.markers["cuboid"].size = (0.4, 0.4, 1.2)
+            cfg.markers["cuboid"].visual_material.diffuse_color = (0.1, 1.0, 0.3)
             self.goal_marker = VisualizationMarkers(cfg)
 
         if not hasattr(self, "spawn_marker"):
             cfg = CUBOID_MARKER_CFG.copy()
             cfg.prim_path = "/Visuals/Command/spawn_position"
-            cfg.markers["cuboid"].size = (0.2, 0.2, 0.2)
-            cfg.markers["cuboid"].visual_material.diffuse_color = (1.0, 0.5, 0.0)
+            cfg.markers["cuboid"].size = (0.4, 0.4, 0.8)
+            cfg.markers["cuboid"].visual_material.diffuse_color = (1.0, 0.55, 0.0)
             self.spawn_marker = VisualizationMarkers(cfg)
 
         if not hasattr(self, "desired_velocity_marker"):
-            cfg = GREEN_ARROW_X_MARKER_CFG.copy()
-            cfg.prim_path = "/Visuals/Command/desired_velocity"
-            cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
-            self.desired_velocity_marker = VisualizationMarkers(cfg)
+            try:
+                cfg = GREEN_ARROW_X_MARKER_CFG.copy()
+                cfg.prim_path = "/Visuals/Command/desired_velocity"
+                cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
+                self.desired_velocity_marker = VisualizationMarkers(cfg)
+            except Exception:
+                self.desired_velocity_marker = None
 
         if not hasattr(self, "current_velocity_marker"):
-            cfg = RED_ARROW_X_MARKER_CFG.copy()
-            cfg.prim_path = "/Visuals/Command/current_velocity"
-            cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
-            self.current_velocity_marker = VisualizationMarkers(cfg)
+            try:
+                cfg = RED_ARROW_X_MARKER_CFG.copy()
+                cfg.prim_path = "/Visuals/Command/current_velocity"
+                cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
+                self.current_velocity_marker = VisualizationMarkers(cfg)
+            except Exception:
+                self.current_velocity_marker = None
 
-        self.goal_marker.set_visibility(True)
-        self.spawn_marker.set_visibility(True)
-        self.desired_velocity_marker.set_visibility(True)
-        self.current_velocity_marker.set_visibility(True)
+        if hasattr(self, "goal_marker") and self.goal_marker is not None:
+            self.goal_marker.set_visibility(True)
+        if hasattr(self, "spawn_marker") and self.spawn_marker is not None:
+            self.spawn_marker.set_visibility(True)
+        if hasattr(self, "desired_velocity_marker") and self.desired_velocity_marker is not None:
+            self.desired_velocity_marker.set_visibility(True)
+        if hasattr(self, "current_velocity_marker") and self.current_velocity_marker is not None:
+            self.current_velocity_marker.set_visibility(True)
 
     def _hide_visualizers(self):
         for name in ["goal_marker", "spawn_marker", "desired_velocity_marker", "current_velocity_marker"]:
-            if hasattr(self, name):
+            if hasattr(self, name) and getattr(self, name) is not None:
                 getattr(self, name).set_visibility(False)
 
     def _debug_vis_callback(self, event):
         """Update visualization markers."""
-        self.goal_marker.visualize(self.goal_position_world)
-        self.spawn_marker.visualize(self.spawn_position_world)
+        if hasattr(self, "goal_marker") and self.goal_marker is not None:
+            self.goal_marker.visualize(self.goal_position_world)
+        if hasattr(self, "spawn_marker") and self.spawn_marker is not None:
+            self.spawn_marker.visualize(self.spawn_position_world)
 
         arrow_position = self.robot.data.root_pos_w.clone()
         arrow_position[:, 2] += 0.5
 
-        desired_scale, desired_quat = self._compute_velocity_arrow(
-            self.command[:, :3], is_goal_direction=True
-        )
-        self.desired_velocity_marker.visualize(arrow_position, desired_quat, desired_scale)
+        if hasattr(self, "desired_velocity_marker") and self.desired_velocity_marker is not None:
+            desired_scale, desired_quat = self._compute_velocity_arrow(
+                self.command[:, :3], is_goal_direction=True
+            )
+            self.desired_velocity_marker.visualize(arrow_position, desired_quat, desired_scale)
 
-        current_scale, current_quat = self._compute_velocity_arrow(
-            self.robot.data.root_lin_vel_b, is_goal_direction=False
-        )
-        self.current_velocity_marker.visualize(arrow_position, current_quat, current_scale)
+        if hasattr(self, "current_velocity_marker") and self.current_velocity_marker is not None:
+            current_scale, current_quat = self._compute_velocity_arrow(
+                self.robot.data.root_lin_vel_b, is_goal_direction=False
+            )
+            self.current_velocity_marker.visualize(arrow_position, current_quat, current_scale)
 
     def _compute_velocity_arrow(
         self,

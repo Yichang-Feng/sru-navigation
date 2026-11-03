@@ -40,6 +40,19 @@ from .terrain_constants import (
 from .hf_terrains_maze_cfg import HfMazeTerrainCfg
 from .hf_terrains_maze import maze_terrain
 from .maze_config import MAZE_TERRAIN_CFG
+from .maze_low_obs_config import LOW_OBS_MAZE_TERRAIN_CFG
+from .go2w_stage_terrains import (
+    GO2W_PHASE1_TERRAIN_CFG,
+    GO2W_PHASE2_TERRAIN_CFG,
+    GO2W_PHASE3_TERRAIN_CFG,
+    GO2W_PHASE4_TERRAIN_CFG,
+    GO2W_PHASE5_TERRAIN_CFG,
+    GO2W_STAGE1_TERRAIN_CFG,
+    GO2W_STAGE2_TERRAIN_CFG,
+    GO2W_STAGE3_TERRAIN_CFG,
+    apply_go2w_terrain_env_overrides,
+)
+
 
 __all__ = [
     # Patches
@@ -58,6 +71,17 @@ __all__ = [
     # Terrain configs
     "HfMazeTerrainCfg",
     "MAZE_TERRAIN_CFG",
+    "LOW_OBS_MAZE_TERRAIN_CFG",
+    "GO2W_PHASE1_TERRAIN_CFG",
+    "GO2W_PHASE2_TERRAIN_CFG",
+    "GO2W_PHASE3_TERRAIN_CFG",
+    "GO2W_PHASE4_TERRAIN_CFG",
+    "GO2W_PHASE5_TERRAIN_CFG",
+    "GO2W_STAGE1_TERRAIN_CFG",
+    "GO2W_STAGE2_TERRAIN_CFG",
+    "GO2W_STAGE3_TERRAIN_CFG",
+    "apply_go2w_terrain_env_overrides",
     # Terrain functions
     "maze_terrain",
 ]
+

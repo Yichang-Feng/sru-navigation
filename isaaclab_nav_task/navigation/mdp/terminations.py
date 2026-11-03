@@ -173,6 +173,54 @@ def at_goal_navigation(
     return termination
 
 
+def at_goal_with_heading_navigation(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    distance_threshold: float = 0.4,
+    heading_threshold: float = 0.1745,  # ~10 degrees
+    goal_cmd_name: str = "robot_goal",
+) -> torch.Tensor:
+    """Terminate the episode when both distance and heading criteria are met at the goal.
+
+    Args:
+        env: The learning environment.
+        asset_cfg: The name of the robot asset.
+        distance_threshold: The distance threshold to the goal.
+        heading_threshold: The heading error threshold in radians (~10 deg = 0.1745 rad).
+        goal_cmd_name: The name of the goal command term.
+
+    Returns:
+        Boolean tensor indicating whether the goal is reached with correct orientation.
+    """
+    from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms.get(goal_cmd_name)
+
+    xy_error = torch.norm(goal_cmd_generator._get_unscaled_command()[:, :2], dim=1)
+    yaw_err = getattr(goal_cmd_generator, "target_yaw_error", torch.zeros_like(xy_error))
+    lin_vel_2d = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
+
+    # Condition: distance < threshold, heading error < threshold, and settled (not flying through)
+    at_goal = (xy_error < distance_threshold) & (torch.abs(yaw_err) < heading_threshold) & (lin_vel_2d < 0.25)
+
+    if not hasattr(goal_cmd_generator, "heading_time_at_goal_in_steps"):
+        goal_cmd_generator.heading_time_at_goal_in_steps = torch.zeros(env.num_envs, device=env.device)
+
+    goal_cmd_generator.heading_time_at_goal_in_steps[at_goal] += 1
+    goal_cmd_generator.heading_time_at_goal_in_steps[~at_goal] = 0
+
+    required_steps = max(2, int(0.4 / env.step_dt))
+    termination = goal_cmd_generator.heading_time_at_goal_in_steps >= required_steps
+
+    env_ids = torch.where(termination)[0]
+    if env_ids.numel() > 0:
+        goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
+
+    return termination
+
+
+
 def terrain_fall(
     env: "ManagerBasedRLEnv",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),

@@ -43,6 +43,10 @@ parser.add_argument("--use_last_checkpoint", action="store_true", help="Use last
 parser.add_argument("--export_jit", action="store_true", default=False, help="Export policy as JIT module.")
 parser.add_argument("--export_onnx", action="store_true", default=False, help="Export policy as ONNX model.")
 parser.add_argument("--num_episodes", type=int, default=None, help="Number of episodes to evaluate before exiting.")
+parser.add_argument("--camera_mode", type=str, default="overview", choices=["overview", "none"], help="Camera mode: 'overview' (sets initial overview viewpoint with full manual mouse control) or 'none'.")
+parser.add_argument("--camera_distance", type=float, default=5.0, help="Camera distance from robot for overview view.")
+parser.add_argument("--camera_height", type=float, default=3.8, help="Camera height above robot for overview view.")
+parser.add_argument("--no_camera_on_reset", action="store_true", default=False, help="Do not refocus overview camera when episode resets.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -107,20 +111,24 @@ def find_latest_checkpoint(log_path: str, checkpoint_pattern: str = "model_.*.pt
     if not checkpoint_files:
         raise ValueError(f"No checkpoint files matching '{checkpoint_pattern}' found in: {run_path}")
 
-    # Sort to get latest checkpoint
-    checkpoint_files.sort(key=lambda m: f"{m:0>15}")
+    # Sort to get latest checkpoint numerically by iteration number
+    def _extract_iter(name: str) -> int:
+        match = re.search(r"model_(\d+)\.pt", name)
+        return int(match.group(1)) if match else -1
+
+    checkpoint_files.sort(key=_extract_iter)
     latest_checkpoint = checkpoint_files[-1]
 
     return os.path.join(run_path, latest_checkpoint)
 
 
-def load_checkpoint_with_fallback(runner: OnPolicyRunner, checkpoint_path: str, load_optimizer: bool = True):
+def load_checkpoint_with_fallback(runner: OnPolicyRunner, checkpoint_path: str, load_optimizer: bool = False):
     """Load checkpoint with fallback for PyTorch compatibility issues.
 
     Args:
         runner: RSL-RL runner instance
         checkpoint_path: Path to checkpoint file
-        load_optimizer: Whether to load optimizer state
+        load_optimizer: Whether to load optimizer state (default False for play/evaluation)
     """
     print(f"[INFO] Loading checkpoint from: {checkpoint_path}")
 
@@ -138,18 +146,24 @@ def load_checkpoint_with_fallback(runner: OnPolicyRunner, checkpoint_path: str, 
 
     # Load normalizers if using empirical normalization
     if runner.empirical_normalization:
-        runner.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
-        runner.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
+        if "obs_norm_state_dict" in loaded_dict:
+            runner.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
+        if "critic_obs_norm_state_dict" in loaded_dict:
+            runner.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])
 
-    # Load optimizer if requested
-    if load_optimizer:
-        if runner.is_mdpo:
-            runner.alg.optimizer_1.load_state_dict(loaded_dict["optimizer_state_dict"])
-        else:
-            runner.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+    # Load optimizer if requested (not needed for evaluation)
+    if load_optimizer and "optimizer_state_dict" in loaded_dict:
+        try:
+            if runner.is_mdpo:
+                runner.alg.optimizer_1.load_state_dict(loaded_dict["optimizer_state_dict"])
+            else:
+                runner.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+        except Exception as e:
+            print(f"[WARNING] Could not load optimizer state dict: {e}. Skipping optimizer state.")
 
-    runner.current_learning_iteration = loaded_dict["iter"]
-    print(f"[INFO] Loaded checkpoint from iteration {loaded_dict['iter']}")
+    iteration = loaded_dict.get("iter", 0)
+    runner.current_learning_iteration = iteration
+    print(f"[INFO] Loaded checkpoint from iteration {iteration}")
 
 
 def export_policy_jit(runner: OnPolicyRunner, checkpoint_path: str):
@@ -234,6 +248,11 @@ def main():
         log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
         resume_path = find_latest_checkpoint(log_root_path, checkpoint_pattern="model_.*.pt")
 
+    # Disable command-level debug_vis to prevent network-dependent USD arrow loading
+    # (play.py provides dedicated offline procedural 3D glowing Start & Goal beacons)
+    if hasattr(env_cfg.commands, "robot_goal"):
+        env_cfg.commands.robot_goal.debug_vis = False
+
     # Create the environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if args_cli.video:
@@ -249,15 +268,77 @@ def main():
     # Wrap the environment
     env = RslRlVecEnvWrapper(env)
 
-    # Check if checkpoint is a TorchScript JIT policy or standard checkpoint dict
+    # Check if checkpoint is an ONNX policy, TorchScript JIT policy, or standard checkpoint dict
+    is_onnx = str(resume_path).endswith(".onnx")
     is_jit = False
-    try:
-        jit_policy = torch.jit.load(resume_path, map_location=env.unwrapped.device)
-        is_jit = True
-    except Exception:
-        is_jit = False
+    if not is_onnx:
+        try:
+            jit_policy = torch.jit.load(resume_path, map_location=env.unwrapped.device)
+            is_jit = True
+        except Exception:
+            is_jit = False
 
-    if is_jit:
+    if is_onnx:
+        import numpy as np
+        import onnxruntime as ort
+
+        print(f"[INFO] Loaded pre-trained ONNX policy directly from: {resume_path}")
+        available_providers = ort.get_available_providers()
+        providers = [p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"] if p in available_providers]
+        ort_sess = ort.InferenceSession(resume_path, providers=providers)
+        print(f"[INFO] ONNX Runtime session active providers: {ort_sess.get_providers()}")
+
+        num_envs = env.unwrapped.num_envs
+        device = env.unwrapped.device
+
+        input_names = [inp.name for inp in ort_sess.get_inputs()]
+        has_h = "h_in" in input_names
+        has_c = "c_in" in input_names
+
+        h_shape = [1, num_envs, 512]
+        c_shape = [1, num_envs, 512]
+        for inp in ort_sess.get_inputs():
+            if inp.name == "h_in" and len(inp.shape) == 3:
+                num_layers = inp.shape[0] if isinstance(inp.shape[0], int) else 1
+                hidden_size = inp.shape[2] if isinstance(inp.shape[2], int) else 512
+                h_shape = [num_layers, num_envs, hidden_size]
+            elif inp.name == "c_in" and len(inp.shape) == 3:
+                num_layers = inp.shape[0] if isinstance(inp.shape[0], int) else 1
+                hidden_size = inp.shape[2] if isinstance(inp.shape[2], int) else 512
+                c_shape = [num_layers, num_envs, hidden_size]
+
+        h_state = np.zeros(h_shape, dtype=np.float32)
+        c_state = np.zeros(c_shape, dtype=np.float32)
+
+        def policy(obs):
+            nonlocal h_state, c_state
+            if hasattr(obs, "keys"):
+                obs = obs["policy"]
+            obs_np = obs.detach().cpu().numpy().astype(np.float32)
+            feed_dict = {"obs": obs_np}
+            if has_h:
+                feed_dict["h_in"] = h_state
+            if has_c:
+                feed_dict["c_in"] = c_state
+
+            outputs = ort_sess.run(None, feed_dict)
+            action_np = outputs[0]
+            if has_h and len(outputs) > 1:
+                h_state = outputs[1]
+            if has_c and len(outputs) > 2:
+                c_state = outputs[2]
+
+            return torch.from_numpy(action_np).to(device)
+
+        def policy_reset(dones):
+            nonlocal h_state, c_state
+            if isinstance(dones, torch.Tensor) and (dones == 1).any():
+                done_mask = (dones == 1).cpu().numpy()
+                if has_h:
+                    h_state[:, done_mask] = 0.0
+                if has_c:
+                    c_state[:, done_mask] = 0.0
+    elif is_jit:
         print(f"[INFO] Loaded pre-trained TorchScript JIT policy directly from: {resume_path}")
         jit_policy.eval()
 
@@ -286,8 +367,8 @@ def main():
         # Create runner
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
 
-        # Load checkpoint with compatibility handling
-        load_checkpoint_with_fallback(runner, resume_path)
+        # Load checkpoint with compatibility handling (optimizer not needed for evaluation)
+        load_checkpoint_with_fallback(runner, resume_path, load_optimizer=False)
 
         # Export JIT if requested
         if args_cli.export_jit:
@@ -326,6 +407,194 @@ def main():
     fall_episodes = 0
     success_times = []
     success_distances = []
+
+    # Setup offline procedural visual markers for Goal (终点) and Start (起点)
+    from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+    import isaaclab.sim as sim_utils
+
+    goal_visualizer = None
+    start_visualizer = None
+
+    try:
+        # Goal Beacon: Neon / Emerald Green (0.5m arrival pad, 1.4m beacon pillar, floating orb)
+        goal_visualizer_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/NavigationMarkers/goal_beacon",
+            markers={
+                "ring": sim_utils.CylinderCfg(
+                    radius=0.5,
+                    height=0.04,
+                    axis="Z",
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.1, 0.95, 0.2),
+                        emissive_color=(0.05, 0.6, 0.1),
+                        roughness=0.3,
+                    ),
+                ),
+                "pillar": sim_utils.CylinderCfg(
+                    radius=0.18,
+                    height=1.4,
+                    axis="Z",
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.15, 1.0, 0.3),
+                        emissive_color=(0.1, 0.7, 0.15),
+                        roughness=0.2,
+                    ),
+                ),
+                "orb": sim_utils.SphereCfg(
+                    radius=0.28,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(0.2, 1.0, 0.4),
+                        emissive_color=(0.15, 0.9, 0.25),
+                        roughness=0.1,
+                    ),
+                ),
+            },
+        )
+        goal_visualizer = VisualizationMarkers(goal_visualizer_cfg)
+
+        # Start Beacon: Amber / Golden Orange (0.5m spawn pad, 0.8m beacon pillar, floating orb)
+        start_visualizer_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/NavigationMarkers/start_beacon",
+            markers={
+                "pad": sim_utils.CylinderCfg(
+                    radius=0.5,
+                    height=0.04,
+                    axis="Z",
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.55, 0.0),
+                        emissive_color=(0.5, 0.25, 0.0),
+                        roughness=0.3,
+                    ),
+                ),
+                "pillar": sim_utils.CylinderCfg(
+                    radius=0.12,
+                    height=0.8,
+                    axis="Z",
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.65, 0.05),
+                        emissive_color=(0.6, 0.3, 0.0),
+                        roughness=0.2,
+                    ),
+                ),
+                "orb": sim_utils.SphereCfg(
+                    radius=0.2,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 0.75, 0.1),
+                        emissive_color=(0.7, 0.4, 0.05),
+                        roughness=0.1,
+                    ),
+                ),
+            },
+        )
+        start_visualizer = VisualizationMarkers(start_visualizer_cfg)
+        print("[VISUAL] Initialized 3D navigation markers: [START] Amber Pad/Beacon | [GOAL] 1.4m Neon-Green Beacon")
+    except Exception as e:
+        print(f"[WARNING] Could not initialize visual markers: {e}")
+
+    def update_markers():
+        if goal_cmd is None:
+            return
+        try:
+            if goal_visualizer is not None and hasattr(goal_cmd, "goal_position_world"):
+                g_pos = goal_cmd.goal_position_world
+                N = g_pos.shape[0]
+                ring_pos = g_pos.clone(); ring_pos[:, 2] += 0.02
+                pillar_pos = g_pos.clone(); pillar_pos[:, 2] += 0.70
+                orb_pos = g_pos.clone(); orb_pos[:, 2] += 1.50
+                all_g = torch.cat([ring_pos, pillar_pos, orb_pos], dim=0)
+                indices_g = [0] * N + [1] * N + [2] * N
+                goal_visualizer.visualize(translations=all_g, marker_indices=indices_g)
+
+            if start_visualizer is not None and hasattr(goal_cmd, "spawn_position_world"):
+                s_pos = goal_cmd.spawn_position_world
+                N = s_pos.shape[0]
+                pad_pos = s_pos.clone(); pad_pos[:, 2] += 0.02
+                pillar_pos = s_pos.clone(); pillar_pos[:, 2] += 0.40
+                orb_pos = s_pos.clone(); orb_pos[:, 2] += 0.90
+                all_s = torch.cat([pad_pos, pillar_pos, orb_pos], dim=0)
+                indices_s = [0] * N + [1] * N + [2] * N
+                start_visualizer.visualize(translations=all_s, marker_indices=indices_s)
+        except Exception:
+            pass
+
+    def set_overview_camera(silent: bool = False):
+        if args_cli.headless or args_cli.camera_mode == "none":
+            return
+        try:
+            robot = env.unwrapped.scene["robot"]
+            r_pos = robot.data.root_pos_w[0].detach().cpu().numpy()
+
+            if goal_cmd is not None and hasattr(goal_cmd, "goal_position_world"):
+                g_pos = goal_cmd.goal_position_world[0].detach().cpu().numpy()
+                dx = float(g_pos[0] - r_pos[0])
+                dy = float(g_pos[1] - r_pos[1])
+                dist = (dx**2 + dy**2)**0.5
+            else:
+                dist = 0.0
+
+            cam_dist = args_cli.camera_distance
+            cam_h = args_cli.camera_height
+
+            if dist > 1.0:
+                ux = dx / dist
+                uy = dy / dist
+                px = -uy
+                py = ux
+                # Place camera behind robot along path, slightly to the side, elevated
+                cam_eye = [
+                    float(r_pos[0] - cam_dist * ux + 0.35 * cam_dist * px),
+                    float(r_pos[1] - cam_dist * uy + 0.35 * cam_dist * py),
+                    float(r_pos[2] + cam_h),
+                ]
+                cam_target = [
+                    float(r_pos[0] + 1.5 * ux),
+                    float(r_pos[1] + 1.5 * uy),
+                    float(r_pos[2] + 0.3),
+                ]
+            else:
+                cam_eye = [
+                    float(r_pos[0] - cam_dist * 0.707),
+                    float(r_pos[1] - cam_dist * 0.707),
+                    float(r_pos[2] + cam_h),
+                ]
+                cam_target = [
+                    float(r_pos[0]),
+                    float(r_pos[1]),
+                    float(r_pos[2] + 0.3),
+                ]
+
+            env.unwrapped.sim.set_camera_view(eye=cam_eye, target=cam_target)
+            if not silent:
+                print(
+                    f"\n[CAMERA] Viewport camera positioned at overview angle (focusing on Robot at x={r_pos[0]:.2f}, y={r_pos[1]:.2f}).\n"
+                    f"         Free manual mouse control active: Left-drag=Orbit | Right-drag/WASD=Fly | Middle-drag=Pan | Scroll=Zoom.\n"
+                    f"         (Press 'C' in the simulation window anytime to re-center overview camera)\n"
+                )
+        except Exception as e:
+            print(f"[WARNING] Could not set camera view: {e}")
+
+    # Keyboard shortcut 'C' for re-centering overview camera in GUI
+    if not args_cli.headless:
+        try:
+            import carb.input
+            import omni.appwindow
+            app_win = omni.appwindow.get_default_app_window()
+            if app_win is not None:
+                kbd = app_win.get_keyboard()
+                input_iface = carb.input.acquire_input_interface()
+
+                def _on_key(event):
+                    if event.type == carb.input.KeyboardEventType.KEY_PRESS:
+                        if event.input.name in ["C", "c"]:
+                            set_overview_camera(silent=False)
+
+                input_iface.subscribe_to_keyboard_events(kbd, _on_key)
+        except Exception:
+            pass
+
+    # Initial marker and camera update
+    update_markers()
+    set_overview_camera(silent=False)
 
     def print_summary():
         if total_episodes == 0:
@@ -379,6 +648,9 @@ def main():
             if policy_reset is not None:
                 policy_reset(dones)
 
+            # Update 3D visual markers for start and goal positions
+            update_markers()
+
             # Check episode completion and record termination statistics
             if isinstance(dones, torch.Tensor) and (dones == 1).any():
                 done_ids = (dones == 1).nonzero(as_tuple=False).flatten().tolist()
@@ -431,6 +703,10 @@ def main():
 
                     if args_cli.num_episodes is not None and total_episodes >= args_cli.num_episodes:
                         break
+
+                # Refocus overview camera if env 0 finished and camera_on_reset is enabled
+                if 0 in done_ids and not args_cli.no_camera_on_reset:
+                    set_overview_camera(silent=True)
 
             if args_cli.num_episodes is not None and total_episodes >= args_cli.num_episodes:
                 print(f"\n[INFO] Reached requested evaluation episodes: {args_cli.num_episodes}")

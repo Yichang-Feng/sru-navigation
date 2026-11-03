@@ -75,10 +75,24 @@ ZEDX_CAMERA_CONFIG = CameraConfig(
 DEFAULT_CAMERA_CONFIG = ZEDX_CAMERA_CONFIG
 """Default camera configuration (ZedX camera settings)."""
 
+# -----------------------------------------------------------------------------
+# Odin1 (LiDAR-aligned depth on Unitree Go2)
+# -----------------------------------------------------------------------------
+ODIN1_CAMERA_CONFIG = CameraConfig(
+    focal_length=29.49,
+    baseline=0.05,
+    min_depth=0.25,
+    max_depth=10.0,
+    resolution=(64, 40),
+    depth_encoder_path=_get_encoder_path("vae_pretrain_new.pth"),
+)
+"""Configuration for Odin1 LiDAR-aligned depth (used with Go2)."""
+
 # Robot-to-camera mapping
 ROBOT_CAMERA_CONFIGS = {
     "b2w": ZEDX_CAMERA_CONFIG,
     "aow_d": ZEDX_CAMERA_CONFIG,
+    "go2": ODIN1_CAMERA_CONFIG,
     "go2w": ZEDX_CAMERA_CONFIG,
 }
 """Dictionary mapping robot names to their camera configurations."""
