@@ -210,13 +210,15 @@ assert agent_b2w_heading.algorithm.learning_rate == 1.5e-4, f"Expected 1.5e-4, g
 assert agent_b2w_heading.algorithm.clip_param == 0.10, f"Expected 0.10, got {agent_b2w_heading.algorithm.clip_param}"
 assert agent_b2w_heading.algorithm.desired_kl == 0.005, f"Expected 0.005, got {agent_b2w_heading.algorithm.desired_kl}"
 assert agent_b2w_heading.policy.init_noise_std == 0.35, f"Expected 0.35, got {agent_b2w_heading.policy.init_noise_std}"
-assert agent_b2w_heading.max_iterations == 800, f"Expected 800, got {agent_b2w_heading.max_iterations}"
+assert agent_b2w_heading.max_iterations == 2500, f"Expected 2500, got {agent_b2w_heading.max_iterations}"
+assert agent_b2w_heading.save_interval == 100, f"Expected 100, got {agent_b2w_heading.save_interval}"
 print("[PASS] Isaac-Nav-MDPO-B2W-Heading-v0 Config Verified!")
 
 agent_b2w_ppo_heading = load_cfg_from_registry("Isaac-Nav-PPO-B2W-Heading-v0", "rsl_rl_cfg_entry_point")
 assert agent_b2w_ppo_heading.algorithm.class_name == "PPO"
 assert agent_b2w_ppo_heading.algorithm.learning_rate == 1.5e-4
-assert agent_b2w_ppo_heading.max_iterations == 800
+assert agent_b2w_ppo_heading.max_iterations == 2500
+assert agent_b2w_ppo_heading.save_interval == 100
 print("[PASS] Isaac-Nav-PPO-B2W-Heading-v0 Config Verified!")
 
 print("\n" + "=" * 60)

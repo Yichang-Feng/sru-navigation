@@ -135,8 +135,8 @@ class B2WNavMDPOHeadingRunnerCfg(B2WNavMDPORunnerCfg):
     """MDPO runner configuration for B2W navigation heading fine-tuning."""
 
     num_steps_per_env = 24
-    max_iterations = 800
-    save_interval = 50
+    max_iterations = 2500
+    save_interval = 100
     experiment_name = "b2w_navigation_heading_mdpo"
 
     def __post_init__(self):
@@ -155,8 +155,8 @@ class B2WNavPPOHeadingRunnerCfg(B2WNavPPORunnerCfg):
     """PPO runner configuration for B2W navigation heading fine-tuning."""
 
     num_steps_per_env = 24
-    max_iterations = 800
-    save_interval = 50
+    max_iterations = 2500
+    save_interval = 100
     experiment_name = "b2w_navigation_heading_ppo"
 
     def __post_init__(self):
