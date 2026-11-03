@@ -489,6 +489,34 @@ def in_goal(
     return distance_goal < distance_threshold
 
 
+def in_goal_with_heading(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    distance_threshold: float = 0.4,
+    heading_threshold: float = 0.1745,  # ~10 deg
+    goal_cmd_name: str = "robot_goal",
+) -> torch.Tensor:
+    """Check if the robot is within distance AND heading threshold at the goal.
+
+    Args:
+        env: The learning environment.
+        asset_cfg: The name of the robot asset.
+        distance_threshold: The distance threshold to the goal in meters.
+        heading_threshold: The heading error threshold in radians (~10 deg = 0.1745 rad).
+        goal_cmd_name: The name of the goal command.
+
+    Returns:
+        Boolean tensor of shape (num_envs, 1) indicating whether both criteria are met.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
+    distance_goal = torch.norm(asset.data.root_pos_w[:, :2] - goal_cmd_generator.pos_command_w[:, :2], dim=1, p=2, keepdim=True)
+    yaw_err = getattr(goal_cmd_generator, "target_yaw_error", torch.zeros_like(distance_goal))
+    if yaw_err.dim() == 1:
+        yaw_err = yaw_err.unsqueeze(-1)
+    return (distance_goal < distance_threshold) & (torch.abs(yaw_err) < heading_threshold)
+
+
 def time_normalized(env: ManagerBasedRLEnv, command_name: str = "robot_goal") -> torch.Tensor:
     """Time normalized to the maximum episode length.
 

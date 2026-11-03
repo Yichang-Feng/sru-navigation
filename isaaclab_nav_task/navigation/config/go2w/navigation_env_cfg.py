@@ -453,9 +453,24 @@ class CriticHeadingCfg(ObsGroup):
 
 
 @configclass
+class MetricsHeadingCfg(ObsGroup):
+    """Observations for heading-aware metrics tracking."""
+
+    in_goal = ObsTerm(
+        func=mdp.in_goal_with_heading,
+        params={"distance_threshold": 0.4, "heading_threshold": 0.1745, "goal_cmd_name": "robot_goal"},
+    )
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = False
+
+
+@configclass
 class ObservationsHeadingCfg(ObservationsCfg):
     policy: PolicyHeadingCfg = PolicyHeadingCfg()
     critic: CriticHeadingCfg = CriticHeadingCfg()
+    metrics: MetricsHeadingCfg = MetricsHeadingCfg()
 
 
 @configclass
@@ -469,9 +484,16 @@ class Go2WNavigationEnvCfg_Heading(Go2WNavigationEnvCfg):
         super().__post_init__()
         self.rewards = Go2WHeadingRewardsCfg()
         self.observations = ObservationsHeadingCfg()
-        # Use heading-aware arrival termination
+        # Use heading-aware arrival termination (distance < 0.4m, heading error < 10 deg, settled)
         self.terminations.early_termination.func = mdp.at_goal_with_heading_navigation
         self.terminations.early_termination.params = {
+            "distance_threshold": 0.4,
+            "heading_threshold": 0.1745,  # ~10 degrees
+            "goal_cmd_name": "robot_goal",
+        }
+        # Use heading-aware timeout termination (record success only if heading aligned)
+        self.terminations.time_out.func = mdp.time_out_with_heading_navigation
+        self.terminations.time_out.params = {
             "distance_threshold": 0.4,
             "heading_threshold": 0.1745,  # ~10 degrees
             "goal_cmd_name": "robot_goal",

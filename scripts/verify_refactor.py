@@ -16,6 +16,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import isaaclab_tasks
 import isaaclab_nav_task
+import isaaclab_nav_task.navigation.mdp as mdp
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
 print("\n" + "=" * 60)
@@ -174,10 +175,11 @@ assert env_heading.rewards.velocity_at_goal.weight == -1.0, f"Expected -1.0, got
 assert hasattr(env_heading.observations.policy, "target_heading"), "Policy must include target_heading obs!"
 assert hasattr(env_heading.observations.critic, "target_heading"), "Critic must include target_heading obs!"
 assert env_heading.terminations.early_termination.params["heading_threshold"] == 0.1745, "Heading threshold should be 0.1745 rad!"
+assert env_heading.terminations.time_out.func == mdp.time_out_with_heading_navigation, "Timeout must be heading-aware!"
+assert env_heading.observations.metrics.in_goal.func == mdp.in_goal_with_heading, "Metrics in_goal must be heading-aware!"
 
 print("Heading Agent Alg:", agent_heading.algorithm.class_name)
 assert agent_heading.algorithm.class_name == "MDPO"
-print("Heading Agent LR:", agent_heading.algorithm.learning_rate)
 assert agent_heading.algorithm.learning_rate == 1.5e-4, f"Expected 1.5e-4, got {agent_heading.algorithm.learning_rate}"
 assert agent_heading.algorithm.clip_param == 0.10, f"Expected 0.10, got {agent_heading.algorithm.clip_param}"
 assert agent_heading.algorithm.desired_kl == 0.005, f"Expected 0.005, got {agent_heading.algorithm.desired_kl}"
@@ -202,6 +204,8 @@ assert env_b2w_heading.rewards.target_heading.weight == 1.0, f"Expected 1.0, got
 assert hasattr(env_b2w_heading.observations.policy, "target_heading"), "B2W Policy must include target_heading obs!"
 assert hasattr(env_b2w_heading.observations.critic, "target_heading"), "B2W Critic must include target_heading obs!"
 assert env_b2w_heading.terminations.early_termination.params["heading_threshold"] == 0.1745, "B2W Heading threshold should be 0.1745 rad!"
+assert env_b2w_heading.terminations.time_out.func == mdp.time_out_with_heading_navigation, "B2W Timeout must be heading-aware!"
+assert env_b2w_heading.observations.metrics.in_goal.func == mdp.in_goal_with_heading, "B2W Metrics in_goal must be heading-aware!"
 
 print("B2W Heading Agent Alg:", agent_b2w_heading.algorithm.class_name)
 assert agent_b2w_heading.algorithm.class_name == "MDPO"

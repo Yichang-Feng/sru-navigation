@@ -72,6 +72,45 @@ def time_out_navigation(
     return termination
 
 
+def time_out_with_heading_navigation(
+    env: "ManagerBasedRLEnv",
+    goal_cmd_name: str = "robot_goal",
+    distance_threshold: float = 0.4,
+    heading_threshold: float = 0.1745,  # ~10 deg
+) -> torch.Tensor:
+    """Terminate the episode when timeout occurs, recording success only if BOTH distance and heading match."""
+    from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
+
+    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
+
+    termination = env.episode_length_buf >= env.max_episode_length
+
+    env_ids = torch.where(termination)[0]
+
+    distance_goal = torch.norm(goal_cmd_generator._get_unscaled_command()[:, :2], dim=1)
+    yaw_err = getattr(goal_cmd_generator, "target_yaw_error", torch.zeros_like(distance_goal))
+
+    # Keep track of time spent at goal with correct heading
+    at_goal_with_heading = (distance_goal < distance_threshold) & (torch.abs(yaw_err) < heading_threshold)
+    if not hasattr(goal_cmd_generator, "heading_time_at_goal"):
+        goal_cmd_generator.heading_time_at_goal = torch.zeros(env.num_envs, device=env.device)
+
+    goal_cmd_generator.heading_time_at_goal[at_goal_with_heading] += 1 * env.step_dt
+
+    # Also update legacy time_at_goal for distance-based rewards if needed
+    goal_cmd_generator.time_at_goal[distance_goal < distance_threshold] += 1 * env.step_dt
+
+    if env_ids.numel() > 0:
+        # Success is strictly awarded ONLY if heading was also satisfied at the goal!
+        success_masks = goal_cmd_generator.heading_time_at_goal > 0.0
+        value_buffer = torch.zeros_like(distance_goal)
+        value_buffer[success_masks] = 1.0
+        goal_cmd_generator.goal_reached_buffer.add(value_buffer, env_ids)
+        goal_cmd_generator.heading_time_at_goal[env_ids] = 0.0
+
+    return termination
+
+
 def illegal_contact_navigation(
     env: "ManagerBasedRLEnv",
     threshold: float,
@@ -216,6 +255,7 @@ def at_goal_with_heading_navigation(
     env_ids = torch.where(termination)[0]
     if env_ids.numel() > 0:
         goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
+        goal_cmd_generator.heading_time_at_goal_in_steps[env_ids] = 0
 
     return termination
 

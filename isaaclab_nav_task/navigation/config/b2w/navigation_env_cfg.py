@@ -130,6 +130,13 @@ class B2WNavigationEnvCfg_Heading(B2WNavigationEnvCfg):
             "heading_threshold": 0.1745,  # ~10 degrees
             "goal_cmd_name": "robot_goal",
         }
+        # Heading-aware timeout termination: only counts success if heading was aligned
+        self.terminations.time_out.func = mdp.time_out_with_heading_navigation
+        self.terminations.time_out.params = {
+            "distance_threshold": 0.4,
+            "heading_threshold": 0.1745,  # ~10 degrees
+            "goal_cmd_name": "robot_goal",
+        }
         # Allow terrain level override for fine-tuning
         init_level = os.environ.get("B2W_INIT_LEVEL", "").strip()
         if init_level:

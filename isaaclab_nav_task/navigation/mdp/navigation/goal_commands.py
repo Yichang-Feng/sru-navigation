@@ -562,6 +562,10 @@ class RobotNavigationGoalCommand(CommandTerm):
         """Reset tracking state for specified environments."""
         self.steps_at_goal[env_ids] = 0
         self.time_at_goal[env_ids] = 0
+        if hasattr(self, "heading_time_at_goal"):
+            self.heading_time_at_goal[env_ids] = 0.0
+        if hasattr(self, "heading_time_at_goal_in_steps"):
+            self.heading_time_at_goal_in_steps[env_ids] = 0
         self.total_distance_traveled[env_ids] = 0.0
         self.previous_position[env_ids] = self.robot.data.root_pos_w[env_ids].clone()
 
