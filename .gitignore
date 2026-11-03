@@ -59,6 +59,9 @@ tensorboard/
 *.pth
 *.pt
 *.ckpt
+*.onnx
+*.zip
+*.rviz
 
 # Temporary files
 tmp/

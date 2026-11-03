@@ -9,7 +9,7 @@
 set -e
 
 # 可通过命令行参数传入新 IP: bash scripts/sync_to_robot.sh <IP>
-ROBOT_IP="${1:-${ROBOT_IP:-192.168.31.186}}"
+ROBOT_IP="${1:-${ROBOT_IP:-10.3.42.161}}"
 ROBOT_USER="agile"
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -23,25 +23,33 @@ if ! ping -c 1 -W 1 "$ROBOT_IP" > /dev/null 2>&1; then
     echo "    若网络正常但 ping 被禁用，将尝试直接进行 SSH/SCP 传输..."
 fi
 
-# 1. 同步修改后的 rl_nav_controller.py 到机载 sru_ws 与 bridge_ws
-echo -e "\n[1/3] 同步核心控制器代码 rl_nav_controller.py..."
-ssh "$ROBOT_USER@$ROBOT_IP" "mkdir -p ~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/ ~/bridge_ws/src/rl_nav_controller/rl_nav_controller/"
+# 1. 同步修改后的 rl_nav_controller 包到机载 sru_ws
+echo -e "\n[1/3] 同步全局导航重构后的 rl_nav_controller 代码..."
+SRC_PKG_DIR="/home/yichangfeng/go2w_robot_ref/sru_ws/src/sru-robot-deployment/rl_nav_controller"
 
-scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
-scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/bridge_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
-echo "[✓] rl_nav_controller.py 同步完成。"
+if [ -d "$SRC_PKG_DIR" ]; then
+    rsync -avz --exclude='__pycache__' --exclude='*.pyc' \
+        "$SRC_PKG_DIR/" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/"
+    echo "[✓] sru_ws/rl_nav_controller 全部代码已同步完成。"
+else
+    echo "[!] 警告: 未找到 $SRC_PKG_DIR，尝试单独同步核心文件..."
+    ssh "$ROBOT_USER@$ROBOT_IP" "mkdir -p ~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/"
+    scp "$WORKSPACE_DIR/scripts/test_global_nav_integration.py" "$ROBOT_USER@$ROBOT_IP:~/"
+fi
 
-# 2. 同步实机 benchmark 评测与数据采集套件
-echo -e "\n[2/3] 同步 benchmark 自动化测试与数据采集套件..."
-ssh "$ROBOT_USER@$ROBOT_IP" "mkdir -p ~/benchmark_scripts/ ~/benchmark_logs/"
-scp -r "$WORKSPACE_DIR/scripts/benchmark/"* "$ROBOT_USER@$ROBOT_IP:~/benchmark_scripts/"
-echo "[✓] benchmark 套件同步完成。"
+# 2. 同步测试脚本与模拟调度器
+echo -e "\n[2/3] 同步全局导航测试套件与规范文档..."
+scp "$WORKSPACE_DIR/scripts/mock_global_nav_tester.py" "$ROBOT_USER@$ROBOT_IP:~/"
+scp "$WORKSPACE_DIR/scripts/test_global_nav_integration.py" "$ROBOT_USER@$ROBOT_IP:~/"
+scp "$WORKSPACE_DIR/docs/GLOBAL_NAV_INTEGRATION_SPEC.md" "$ROBOT_USER@$ROBOT_IP:~/"
+echo "[✓] 测试脚本与规范文档同步完成。"
 
-# 3. 提示在机载端生效
+# 3. 提示在机载端生效与编译
 echo -e "\n[3/3] 部署就绪！"
 echo "------------------------------------------------------------------"
-echo "提示：Python 节点修改后直接生效（若工作空间为 symlink-install）。"
-echo "如需彻底重新编译机载工作空间，可在机器人上运行："
+echo "提示：请在机器人上重新编译生效（推荐 symlink-install 免二次编译）："
 echo "  ssh agile@$ROBOT_IP"
-echo "  cd ~/sru_ws && colcon build --packages-select rl_nav_controller --symlink-install"
+echo "  cd ~/sru_ws"
+echo "  source /opt/ros/humble/setup.bash"
+echo "  colcon build --packages-select rl_nav_controller --symlink-install"
 echo "=================================================================="

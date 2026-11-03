@@ -30,8 +30,8 @@ from rsl_rl.modules.actor_critic_sru import ActorCriticSRU
 
 
 def surgery_expand_heading_from_onnx(
-    onnx_path: str = "/home/yichangfeng/SRU-Odin/Deployment/models/nav_policy.onnx",
-    template_path: str = "/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/rsl_rl/go2w_navigation_mdpo_phase1/2026-10-22_18-12-19_mdpo_phase1_anneal/model_1999.pt",
+    onnx_path: str = "/home/yichangfeng/go2w_robot_ref/sru_ws/model/nav_policy.onnx",
+    template_path: str = "/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/rsl_rl/b2w_navigation_ppo/2026-10-19_14-16-10/model_14999.pt",
     output_path: str = "/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/warmstart_nav_policy_heading.pt",
     init_noise_std: float = 0.35,
     verify: bool = True,
@@ -222,8 +222,8 @@ def surgery_expand_heading_from_onnx(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--onnx", default="/home/yichangfeng/SRU-Odin/Deployment/models/nav_policy.onnx")
-    parser.add_argument("--template", default="/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/rsl_rl/go2w_navigation_mdpo_phase1/2026-10-22_18-12-19_mdpo_phase1_anneal/model_1999.pt")
+    parser.add_argument("--onnx", default="/home/yichangfeng/go2w_robot_ref/sru_ws/model/nav_policy.onnx")
+    parser.add_argument("--template", default="/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/rsl_rl/b2w_navigation_ppo/2026-10-19_14-16-10/model_14999.pt")
     parser.add_argument("--output", default="/home/yichangfeng/sru-navigation-learning/IsaacLab/logs/warmstart_nav_policy_heading.pt")
     parser.add_argument("--noise-std", type=float, default=0.35)
     parser.add_argument("--no-verify", action="store_true")
