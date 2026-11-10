@@ -105,6 +105,24 @@ class OnPolicyRunner:
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
 
+        # Freezing configuration for fine-tuning
+        self.freeze_iters = int(os.environ.get("FREEZE_ITERS", self.cfg.get("freeze_iters", 0)))
+        self._sru_currently_frozen = True if self.freeze_iters > 0 else False
+        if self.freeze_iters > 0:
+            print(f"[OnPolicyRunner] Partial freezing enabled: Depth/Attention/SRU frozen for first {self.freeze_iters} iterations.")
+            self.set_freeze_spatial_and_sru(True)
+
+    def set_freeze_spatial_and_sru(self, freeze: bool):
+        """Freeze/unfreeze spatial attention and SRU layers across all policy networks."""
+        if self.is_mdpo:
+            if hasattr(self.alg.actor_critic_1, "set_freeze_spatial_and_sru"):
+                self.alg.actor_critic_1.set_freeze_spatial_and_sru(freeze)
+            if hasattr(self.alg.actor_critic_2, "set_freeze_spatial_and_sru"):
+                self.alg.actor_critic_2.set_freeze_spatial_and_sru(freeze)
+        else:
+            if hasattr(self.alg.actor_critic, "set_freeze_spatial_and_sru"):
+                self.alg.actor_critic.set_freeze_spatial_and_sru(freeze)
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         """Run the training loop.
 
@@ -164,6 +182,22 @@ class OnPolicyRunner:
 
         for it in range(start_iter, tot_iter):
             start = time.time()
+
+            # Manage partial freezing transition
+            if self.freeze_iters > 0:
+                if it < self.freeze_iters:
+                    self.set_freeze_spatial_and_sru(True)
+                else:
+                    if getattr(self, "_sru_currently_frozen", True):
+                        print(f"\n[OnPolicyRunner] >>> Iteration {it} reached/exceeded freeze_iters ({self.freeze_iters}). UNFREEZING Spatial Attention and SRU layers for joint fine-tuning! <<<\n")
+                        self.set_freeze_spatial_and_sru(False)
+                        self._sru_currently_frozen = False
+
+            # Inform environment of current iteration and total iterations for curriculum
+            if hasattr(self.env, "unwrapped"):
+                unwrapped_env = self.env.unwrapped
+                unwrapped_env.current_learning_iteration = it
+                unwrapped_env.max_learning_iterations = tot_iter
 
             # Check if we should start recording video this iteration
             if self.video_recorder:

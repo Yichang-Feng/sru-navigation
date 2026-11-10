@@ -196,6 +196,42 @@ class ActorCriticSRU(nn.Module):
             + list(self.memory_c.parameters())
         )
 
+    def set_freeze_spatial_and_sru(self, freeze: bool):
+        """Freeze/unfreeze Depth Encoder, Spatial Attention, and SRU memory layers.
+
+        When frozen:
+        - Frozen: Spatial Attention / Cross Attention in attn_image_net, attn_critic_image_net, attn_height_net,
+          and SRU memory modules (memory_a, memory_c).
+        - Trainable: Observation Embedding (info_proj in attention nets), Policy Head (MLP),
+          Critic Head (MLP), action log_std, and time_layer.
+        When unfrozen:
+        - All parameters have requires_grad = True.
+        """
+        for net in [self.attn_image_net, self.attn_critic_image_net, self.attn_height_net]:
+            for name, param in net.named_parameters():
+                if "info_proj" in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = not freeze
+
+        for param in self.memory_a.parameters():
+            param.requires_grad = not freeze
+        for param in self.memory_c.parameters():
+            param.requires_grad = not freeze
+
+        for param in self.linear_dropout_actor.parameters():
+            param.requires_grad = True
+        for param in self.actor.parameters():
+            param.requires_grad = True
+        for param in self.linear_dropout_critic.parameters():
+            param.requires_grad = True
+        for param in self.critic.parameters():
+            param.requires_grad = True
+        self.log_std.requires_grad = True
+        if hasattr(self, "time_layer"):
+            for param in self.time_layer.parameters():
+                param.requires_grad = True
+
     @staticmethod
     def init_weights(sequential, scales):
         """Initialize all Linear layers in a sequential module using orthogonal initialization."""

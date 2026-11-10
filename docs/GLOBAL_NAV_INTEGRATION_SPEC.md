@@ -53,35 +53,45 @@ sequenceDiagram
 ## 2. 状态机设计与上报机制 (Multi-State & Standard JSON Reporting)
 
 ### 2.1 状态枚举与 JSON 格式定义 (Standard JSON Status)
-状态机对齐 `local_planner_status_diagram.html` 标准规范，所有上报通过 `/local_planner/status` 以 JSON 字符串发布：
-`{"state": "<state>", "msgs": "<msgs>"}`
+状态机严格对齐 `local_planner_status_diagram (1).html` 标准规范，所有上报通过 `/local_planner/status` 以 JSON 字符串发布：
+`{"state": "<state>", "msgs": <array>}`
 
-各状态语义与字段定义如下：
+各状态语义与字段定义如下（默认 `msgs` 为 JSON 原生数组：非 error 时为 `[]`，error 时为 `["zed_camera_lost"]`）：
 
 | 状态值 (`state`) | 附带消息 (`msgs`) | 状态语义 | 触发条件与恢复策略 | 机体动作 |
 | :--- | :--- | :--- | :--- | :--- |
-| **`"idle"`** | `""` (留空) | **空闲就绪** | 节点启动就绪、或已完成全流程且无路径任务。 | 原地站立静止，等待新路径。 |
-| **`"running"`** | `""` (留空) | **任务执行中** | 收到有效全局 Path、或在 `stopped` / `failed` 状态下收到 `resume` 指令恢复执行。 | 按前瞻胡萝卜点推进，ZED 深度自主避障。 |
-| **`"goal_reached"`** | `""` (留空) | **本段路径已到达** | 机器狗距离当前段 Path 的**最终目标点** $< 0.10\text{m} \sim 0.15\text{m}$。 | 主动刹停置零速度，清除已完成目标，瞬发上报并锁存（心跳不再重复广播）。 |
-| **`"failed"`** | `""` (留空) | **规划受阻/死锁停滞** | 前方被障碍物完全封堵，连续停滞超时（默认 $>4.0\text{s}$）。**可恢复**：上层重发 `/global_path` 或发送 `resume` 即可脱困继续。 | 主动减速刹停，避免顶撞障碍物，等待上层重规划。 |
-| **`"error"`** | `"zed_camera_lost"` | **传感器/硬件致命异常** | ZED 相机深度帧连续中断超时（$>2.0\text{s}$）。**不可自动恢复**：此时下发新路径会被主动拒绝，需检查硬件连线或重启终端。 | 主动减速刹停，拒绝接收新路径，等待重启/硬件恢复。 |
-| **`"stopped"`** | `""` (留空) | **停止/暂停** | 收到上层指令 (`/mission/control: "pause"` 或 `"stop"`)、现场手柄按 ABORT、或收到空路径。 | 原地紧急制动刹停，**自动默认保留当前未跑完的路径与进度**。后续收到 `"resume"` 即可继续走完；若收到新路径则直接切换新路径执行。 |
+| **`"idle"`** | `[]` (空数组) | **空闲就绪** | 节点启动就绪、或已完成全流程且无路径任务。收到新路径直接跃迁至 `running`。 | 原地站立静止，等待新路径。 |
+| **`"running"`** | `[]` (空数组) | **任务执行中** | 收到有效全局 Path、或在 `stopped` / `failed` 状态下收到 `resume` 指令恢复执行。 | 按前瞻胡萝卜点推进，ZED 深度自主避障。 |
+| **`"goal_reached"`** | `[]` (空数组) | **本段路径已到达** | 机器狗距离当前段 Path 的**最终目标点** $< 0.10\text{m} \sim 0.15\text{m}$。 | 主动刹停置零速度，清除已完成目标，瞬发上报后立刻变至 `idle`，构成单向闭环三角（`idle -> running -> goal_reached -> idle`）。 |
+| **`"failed"`** | `[]` (空数组) | **规划受阻/死锁停滞** | 前方被障碍物完全封堵，连续停滞超时（默认 $>4.0\text{s}$）。**可恢复**：上层重发 `/global_path` 或发送 `resume` 即可脱困继续。 | 主动减速刹停，避免顶撞障碍物，等待上层重规划。 |
+| **`"error"`** | `["zed_camera_lost"]` | **传感器/硬件致命异常** | ZED 相机深度帧连续中断超时（$>2.0\text{s}$）。**不可自动恢复**：此时下发新路径会被主动拒绝，需检查硬件连线或重启终端。 | 主动减速刹停，拒绝接收新路径，等待重启/硬件恢复。 |
+| **`"stopped"`** | `[]` (空数组) | **停止/暂停** | 收到上层指令 (`/mission/control: "pause"` 或 `"stop"`)、现场手柄按 ABORT、或收到空路径。 | 原地紧急制动刹停，**自动在内存中保留未跑完路径**。**停后收新路径仍保持 stopped**（仅更新内存路径），**只有收到 `"resume"` 才会重新启动**（跟随新路径或走完旧路径）。 |
+
+> **标准上报格式示例**（直接对应 `local_planner_status_diagram (1).html`）：
+> - 正常行走：`{"state":"running","msgs":[]}`
+> - 本段到达：`{"state":"goal_reached","msgs":[]}`
+> - 遇阻死锁：`{"state":"failed","msgs":[]}`
+> - 相机掉线：`{"state":"error","msgs":["zed_camera_lost"]}`
+>
+> **参数化兼容模式**：控制器亦支持通过 `--status-msgs-format` 切换为 `string_brackets`（`"[]"` 与 `'["..."]'`）或 `empty_string`（`""`）。接收端工具对各种形态均实现无缝容错解析。
 
 > **向后兼容别名**：代码内部 `NavState` 保留 `ARRIVED="goal_reached"`, `BLOCKED="failed"`, `STOP="stopped"`, `PAUSED="stopped"` 别名映射。
 
-### 2.2 上报通信策略：1Hz 周期心跳 + 关键事件毫秒级瞬发 + 锁存机制
+### 2.2 上报通信策略：1Hz 周期心跳 + 关键事件毫秒级瞬发 + 单向闭环三角
 * **通信 QoS 配置**：
-  * `/local_planner/status` 采用 **`Reliability: RELIABLE`** 与 **`Durability: TRANSIENT_LOCAL`** (depth=1)，确保新加入或重启的上层节点可立即获取最新上报状态；
+  * `/local_planner/status` 采用 **`Reliability: RELIABLE`** 与 **`Durability: TRANSIENT_LOCAL`** (depth=10)，确保状态瞬发与突发切换均完整推入队列；
 * **低频周期心跳（1Hz）**：
   * 若无状态切换，以 **1Hz** 频率周期性广播当前 JSON 状态；
-  * 特殊规则：到达状态 (`"goal_reached"`) 在到点时仅瞬发上报一次并进入锁存状态，后续 1Hz 心跳不再重复广播该状态；
+  * 特殊规则：到达状态 (`"goal_reached"`) 在到点时瞬发上报一次后立刻变至 `idle`；在 `idle` 下以 1Hz 心跳广播并持续监听新路径，一旦收到新路径直接跃迁至 `running`；
 * **事件驱动瞬发（Event-Triggered Immediate Dispatch）**：
   * 在状态发生跃迁的**当个控制循环瞬时（毫秒级）**，立即调用发布器推入 ROS 2 中间件，包括：
-    1. 检测到进入最终点 $<0.15\text{m}$ 的瞬间 $\rightarrow$ 立即发布 `{"state":"goal_reached","msgs":""}` 并锁存；
-    2. 检测到停滞超时的瞬间 $\rightarrow$ 立即发布 `{"state":"failed","msgs":""}`；
-    3. 检测到相机掉线超时的瞬间 $\rightarrow$ 立即发布 `{"state":"error","msgs":"zed_camera_lost"}`；
-    4. 收到 `/mission/control: "pause"` 或 `"stop"` 的瞬间 $\rightarrow$ 立即发布 `{"state":"stopped","msgs":""}`；
-    5. 收到 `/mission/control: "resume"` 或 `"continue"` 或收到新路径启动的瞬间 $\rightarrow$ 立即发布 `{"state":"running","msgs":""}`。
+    1. 检测到进入最终点 $<0.15\text{m}$ 的瞬间 $\rightarrow$ 立即发布 `{"state":"goal_reached","msgs":[]}` 并立刻变至 `idle`；
+    2. 进入 `idle` 后以 1Hz 广播心跳，持续监测新路径；
+    3. 检测到停滞超时的瞬间 $\rightarrow$ 立即发布 `{"state":"failed","msgs":[]}`；
+    4. 检测到相机掉线超时的瞬间 $\rightarrow$ 立即发布 `{"state":"error","msgs":["zed_camera_lost"]}`；
+    5. 收到 `/mission/control: "pause"` 或 `"stop"` 的瞬间 $\rightarrow$ 立即发布 `{"state":"stopped","msgs":[]}`；
+    6. 处于 `stopped` 下收到新路径 $\rightarrow$ 仅更新内存路径，保持 `stopped` 且不自启；
+    7. 收到 `/mission/control: "resume"` 或 `"continue"` 或在非 stopped 状态下收到新路径启动的瞬间 $\rightarrow$ 立即发布 `{"state":"running","msgs":[]}`。
 
 ### 2.3 停滞遇阻判定机理（Blocked Detection）
 * **监控指标**：
@@ -89,7 +99,7 @@ sequenceDiagram
   * 机器狗物理地面测速 $v_{real} = \sqrt{v_x^2 + v_y^2}$；
 * **判定逻辑**：
   * 若当前状态处于 `RUNNING`，但由于前方障碍物过近（如 $<0.4\text{m}$）导致策略输出被安全抑制，连续 **$4.0\text{s}$（可配置参数）** 内满足 $\Delta s < 0.1\text{m}$ 且 $v_{real} < 0.1\text{m/s}$；
-  * 触发 `FAILED` 状态，将输出速度强制置零，上报 `{"state":"failed","msgs":""}`，防止机器狗死磕障碍物，等待上层全局重规划（重发新路径或发送 resume 即可恢复）。
+  * 触发 `FAILED` 状态，将输出速度强制置零，上报 `{"state":"failed","msgs":[]}`，防止机器狗死磕障碍物，等待上层全局重规划（重发新路径或发送 resume 即可恢复）。
 
 ---
 

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>局部规划器状态图 · /local_planner/status (Go2W RL 当前版本)</title>
+<style>
+  :root{
+    --bg:#0a1120; --panel:#101a2e; --panel2:#0d1526; --line:#22304b;
+    --text:#e7eefa; --muted:#9fb0cc; --sub:#7c8db0;
+    --idle:#5b6b85; --running:#17914a; --goal:#2463eb; --failed:#b45309; --error:#d23c3c; --stopped:#c9770c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1100px 640px at 25% -10%, #16233d 0%, var(--bg) 58%);
+       color:var(--text);line-height:1.6;
+       font-family:"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       padding:26px 18px 56px;font-size:15px}
+  .wrap{max-width:1240px;margin:0 auto}
+  h1{font-size:23px;margin:0 0 6px;letter-spacing:.4px}
+  .sub{color:var(--muted);font-size:13.5px;margin-bottom:18px}
+  .sub code, td code, .note code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    background:#0b1526;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#cfe0ff;font-size:.92em}
+  .card{background:linear-gradient(180deg,var(--panel) 0%,var(--panel2) 100%);border:1px solid var(--line);
+        border-radius:16px;padding:18px 18px 14px;margin:16px 0;box-shadow:0 12px 34px rgba(0,0,0,.28)}
+  .card h2{font-size:15px;margin:0 0 12px;color:#cfe0ff;font-weight:700;letter-spacing:.5px}
+  .prio{display:flex;gap:8px;flex-wrap:wrap}
+  .pill{font-size:12.5px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:#0b1526;color:#dbe7ff}
+  .pill i{font-style:normal;color:var(--sub);margin-right:6px}
+  svg{width:100%;height:auto;display:block}
+  .node text{font-weight:700;fill:#fff;text-anchor:middle}
+  .node .nm{font-size:18px}
+  .node .fr{font-size:11.5px;font-weight:500;fill:rgba(255,255,255,.85)}
+  .edge{fill:none;stroke:#9db0cf;stroke-width:2.4}
+  .lbl{font-size:13px;font-weight:600;fill:#dbe6f7;paint-order:stroke;stroke:#0a1120;stroke-width:4.5;stroke-linejoin:round}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:10px}
+  .chip{display:inline-flex;align-items:center;gap:7px}
+  .dot{width:12px;height:12px;border-radius:50%}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:#9fb0cc;font-weight:700;font-size:12.5px;letter-spacing:.3px;background:#0b1526}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+  .note{font-size:13.5px;color:var(--muted)}
+  .note b{color:#dbe7ff}
+  ul{margin:4px 0 0;padding-left:20px}
+  li{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Unitree Go2W 局部导航控制器 · 状态变化图 (当前对齐标准)</h1>
+  <div class="sub">由 <code>rl_nav_controller</code>（机载 RL 局部导航控制器）发布 · 状态机依据实时传感器、路径跟踪与指令事件判定</div>
+
+  <div class="card">
+    <h2>优先级与状态集合（6 状态体系，从高到低）</h2>
+    <div class="prio">
+      <span class="pill"><i>1</i>stopped (停止/暂停)</span>
+      <span class="pill"><i>2</i>idle (空闲就绪)</span>
+      <span class="pill"><i>3</i>goal_reached (本段到达)</span>
+      <span class="pill"><i>4</i>failed (业务受阻死锁)</span>
+      <span class="pill"><i>5</i>error (硬件传感器丢失)</span>
+      <span class="pill"><i>6</i>running (自主推进中)</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>状态转移图 (6 状态全链路拓扑)</h2>
+    <svg viewBox="0 0 1240 850" role="img" aria-label="局部规划器状态转移图">
+      <defs>
+        <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9db0cf"></path>
+        </marker>
+      </defs>
+
+      <!-- ===== 话题/类型 说明框 ===== -->
+      <rect x="90" y="14" width="1060" height="74" rx="12" fill="#0b1526" stroke="#22304b"></rect>
+      <text x="620" y="38" text-anchor="middle" font-size="15" font-weight="700" fill="#cfe0ff">发布话题：/local_planner/status 　·　类型：std_msgs/String（内容为 JSON）　·　QoS：reliable + transient_local</text>
+      <text x="620" y="58" text-anchor="middle" font-size="12.5" fill="#8fa3c4">JSON 字段：state · msgs 　·　state ∈ idle / running / goal_reached / failed / error / stopped</text>
+      <text x="620" y="76" text-anchor="middle" font-size="11.5" fill="#60a5fa">msgs 格式兼容：非 error 默认为 "[]"（同时兼容 [] 与 ""）；error 时为 "zed_camera_lost"</text>
+
+      <!-- ===== 转移箭头 ===== -->
+      <!-- idle -> running -->
+      <path class="edge" marker-end="url(#arw)" d="M270,165 Q395,250 520,368"></path>
+      <text class="lbl" x="392" y="248" text-anchor="middle">收到新路径 (/global_path)</text>
+
+      <!-- running -> goal_reached (arrival) -->
+      <path class="edge" marker-end="url(#arw)" d="M720,368 Q880,280 1050,172"></path>
+      <text class="lbl" x="900" y="252" text-anchor="middle">到达终点 (&lt; 0.15m)</text>
+
+      <!-- goal_reached -> idle (immediate return, forming unidirectional triangle) -->
+      <path class="edge" marker-end="url(#arw)" d="M940,160 L300,160"></path>
+      <text class="lbl" x="620" y="150" text-anchor="middle">上报后立刻变至 idle</text>
+
+      <!-- running -> failed (obstacle stalled) -->
+      <path class="edge" marker-end="url(#arw)" d="M590,452 L590,588"></path>
+      <text class="lbl" x="535" y="520" text-anchor="middle">停滞遇阻 ≥ 4.0s</text>
+
+      <!-- failed -> running (replan / resume) -->
+      <path class="edge" marker-end="url(#arw)" d="M650,588 L650,452"></path>
+      <text class="lbl" x="725" y="520" text-anchor="middle">重发新路径 / resume</text>
+
+      <!-- running -> error (camera lost) -->
+      <path class="edge" marker-end="url(#arw)" d="M720,412 Q880,500 1050,588"></path>
+      <text class="lbl" x="910" y="522" text-anchor="middle">ZED 相机丢帧 &gt; 2.0s</text>
+
+      <!-- stopped -> running -->
+      <path class="edge" marker-end="url(#arw)" d="M300,614 Q410,520 520,412"></path>
+      <text class="lbl" x="410" y="508" text-anchor="middle">/mission/control: "resume"</text>
+
+      <!-- ===== 节点 ===== -->
+      <!-- IDLE -->
+      <g class="node">
+        <rect x="100" y="118" width="200" height="84" rx="16" fill="var(--idle)" stroke="#93a3bb"></rect>
+        <text class="nm" x="200" y="156">idle</text>
+        <text class="fr" x="200" y="180">未收到路径 · 1Hz</text>
+      </g>
+
+      <!-- GOAL_REACHED -->
+      <g class="node">
+        <rect x="940" y="118" width="200" height="84" rx="16" fill="var(--goal)" stroke="#60a5fa"></rect>
+        <text class="nm" x="1040" y="156">goal_reached</text>
+        <text class="fr" x="1040" y="180">本段到达 · 瞬发后即切 idle</text>
+      </g>
+
+      <!-- RUNNING -->
+      <g class="node">
+        <rect x="520" y="348" width="200" height="84" rx="16" fill="var(--running)" stroke="#4ade80" stroke-width="2.2"></rect>
+        <text class="nm" x="620" y="386">running</text>
+        <text class="fr" x="620" y="410">自主避障推进 · 1Hz</text>
+      </g>
+
+      <!-- STOPPED -->
+      <g class="node">
+        <rect x="100" y="588" width="200" height="84" rx="16" fill="var(--stopped)" stroke="#fbbf24"></rect>
+        <text class="nm" x="200" y="626">stopped</text>
+        <text class="fr" x="200" y="650">暂停(保留路径) · 1Hz</text>
+      </g>
+
+      <!-- FAILED (Obstacle blocked / stalled) -->
+      <g class="node">
+        <rect x="520" y="588" width="200" height="84" rx="16" fill="var(--failed)" stroke="#f59e0b" stroke-width="2"></rect>
+        <text class="nm" x="620" y="626">failed</text>
+        <text class="fr" x="620" y="650">遇阻死锁(可恢复) · 1Hz</text>
+      </g>
+
+      <!-- ERROR (Fatal Hardware / Camera Lost) -->
+      <g class="node">
+        <rect x="940" y="588" width="200" height="84" rx="16" fill="var(--error)" stroke="#f87171" stroke-width="2"></rect>
+        <text class="nm" x="1040" y="626">error</text>
+        <text class="fr" x="1040" y="650">相机掉线(需重启) · 1Hz</text>
+      </g>
+
+      <!-- ===== pause 全局规则 ===== -->
+      <rect x="350" y="754" width="540" height="46" rx="23" fill="#1a1408" stroke="#5a431a"></rect>
+      <text x="620" y="783" text-anchor="middle" font-size="14" font-weight="700" fill="#fbbf24">任意状态 ── /mission/control: "pause" ──▶ stopped（底盘刹停，保留进度）</text>
+    </svg>
+
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:var(--idle)"></span>idle 空闲</span>
+      <span class="chip"><span class="dot" style="background:var(--running)"></span>running 运行中</span>
+      <span class="chip"><span class="dot" style="background:var(--goal)"></span>goal_reached 本段到达</span>
+      <span class="chip"><span class="dot" style="background:var(--failed)"></span>failed 业务遇阻 (可直接恢复)</span>
+      <span class="chip"><span class="dot" style="background:var(--error)"></span>error 硬件异常 (拒绝新路径/需重启)</span>
+      <span class="chip"><span class="dot" style="background:var(--stopped)"></span>stopped 暂停 (保留路径)</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>状态转移表（精确触发条件与恢复机制）</h2>
+    <table>
+      <thead>
+        <tr><th style="width:12%">从</th><th style="width:14%">到</th><th style="width:40%">触发条件</th><th>机体动作与恢复机制</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>idle</code></td><td><code>running</code></td>
+          <td>收到新分段路径：<code>/global_path</code>（有效点集）</td>
+          <td>加载路径至折线跟踪器，前瞻胡萝卜点引导，ZED 深度自主避障</td></tr>
+
+        <tr><td><code>running</code></td><td><code>goal_reached</code></td>
+          <td>机器人中心距离当前段终端点 &lt; <code>segment_arrive_threshold</code> (0.15m)</td>
+          <td>主动刹停速度置零，清除已达路段，瞬发 1 次到达上报</td></tr>
+
+        <tr><td><code>goal_reached</code></td><td><code>idle</code></td>
+          <td>完成到达上报</td>
+          <td>瞬发后立刻变至 idle 空闲就绪（构成单向闭环三角）；在 idle 状态以 1Hz 广播心跳持续监听新路径，一旦收到新路径立即进入 running 推进</td></tr>
+
+        <tr><td><code>running</code></td><td><code>failed</code></td>
+          <td>由于前方障碍物完全封堵，连续 <code>blocked_timeout</code>(4.0s) 进尺 &lt; 0.1m 且线速度 &lt; 0.1m/s</td>
+          <td>主动置零刹停避免死磕障碍物。<br/><b>脱困恢复</b>：上层重新下发绕行新路径或下发 <code>resume</code> 即可直接恢复 <code>running</code>，无需重启</td></tr>
+
+        <tr><td><code>failed</code></td><td><code>running</code></td>
+          <td>上层下发避障新路径，或发送 <code>/mission/control: "resume"</code></td>
+          <td>重置停滞检测器，恢复自主推进</td></tr>
+
+        <tr><td><code>running</code></td><td><code>error</code></td>
+          <td>ZED 深度相机连续丢帧超时 &gt; <code>camera_timeout</code> (2.0s)</td>
+          <td>主动紧急制动刹停，防止无视觉盲跑撞击。<br/><b>不可自动恢复</b>：此时下发新路径会被主动拒绝，需检查硬件连接或重启机载终端</td></tr>
+
+        <tr><td>任意状态</td><td><code>stopped</code></td>
+          <td>收到指令 <code>/mission/control: "pause"</code> 或手柄 ABORT</td>
+          <td>主动刹停底盘，<b>自动在内存中保留未跑完路径与进度</b></td></tr>
+
+        <tr><td><code>stopped</code></td><td><code>running</code></td>
+          <td>收到指令 <code>/mission/control: "resume"</code> 且内存中有有效路径</td>
+          <td>若暂停期间收到过新路径则按新路径开始推进；若无新路径则从当前物理位置继续走完旧路径剩余路段</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>状态上报 JSON 格式与 <code>msgs</code> 规范一览（对齐 local_planner_status_diagram (1).html）</h2>
+    <table>
+      <thead>
+        <tr><th style="width:18%">当前状态 (state)</th><th style="width:25%">默认 msgs 内容</th><th style="width:25%">兼容格式</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>idle</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>无路径任务，等待调度</td></tr>
+        <tr><td><code>running</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>自主避障循迹中</td></tr>
+        <tr><td><code>goal_reached</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>到达本段终点，等待下一段</td></tr>
+        <tr><td><code>failed</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>遇阻死锁（非致命，可脱困）</td></tr>
+        <tr><td><code>stopped</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>已暂停（路径保留在内存中）</td></tr>
+        <tr><td><code>error</code></td><td><code>["zed_camera_lost"]</code></td><td><code>'["zed_camera_lost"]'</code>, <code>"zed_camera_lost"</code></td><td>视觉传感器掉线（致命硬件故障）</td></tr>
+      </tbody>
+    </table>
+    <div class="note" style="margin-top:10px">
+      <b>示例</b>：<br/>
+      正常/到达/遇阻：<code>{"state":"goal_reached","msgs":[]}</code> 或 <code>{"state":"running","msgs":[]}</code><br/>
+      硬件故障：<code>{"state":"error","msgs":["zed_camera_lost"]}</code>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>关键技术规范补充说明</h2>
+    <ul class="note">
+      <li><b><code>msgs</code> 兼容性</b>：默认按照上层期望输出字符串中括号 <code>"[]"</code> 表示空列表；同时系统支持参数 <code>--status-msgs-format</code> 配置输出 <code>"[]"</code>、<code>[]</code> 或 <code>""</code>，接收端亦完整兼容这几种格式的解析。</li>
+      <li><b><code>failed</code> 与 <code>error</code> 严格分离</b>：
+        <ul>
+          <li><b><code>failed</code></b>：业务避障层面的受阻停滞，<code>msgs</code> 为 <code>"[]"</code>。无需重启，重发路径即可继续。</li>
+          <li><b><code>error</code></b>：硬件层面的致命传感器丢失，<code>msgs</code> 为 <code>"zed_camera_lost"</code>。控制器主动拒绝新路径以保障安全，需重启或排查连线。</li>
+        </ul>
+      </li>
+      <li><b>心跳与瞬发</b>：未变化时以 1Hz 周期广播；状态发生跳变时当个控制循环瞬时毫秒级发布。</li>
+      <li><b>底盘总闸自动解锁</b>：<code>rl_nav_controller</code> 启动且定位就绪后，自动发布 <code>/startNavi: true</code> 与 <code>/motion_enabled: true</code> 解锁底盘电机。</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

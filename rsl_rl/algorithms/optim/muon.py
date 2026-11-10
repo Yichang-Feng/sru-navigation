@@ -76,12 +76,13 @@ class Muon(torch.optim.Optimizer):
             for base_i in range(len(params))[::dist.get_world_size()]:
                 if base_i + dist.get_rank() < len(params):
                     p = params[base_i + dist.get_rank()]
-                    state = self.state[p]
-                    if len(state) == 0:
-                        state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update, alpha=-group["lr"])
+                    if p.grad is not None:
+                        state = self.state[p]
+                        if len(state) == 0:
+                            state["momentum_buffer"] = torch.zeros_like(p)
+                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                        p.mul_(1 - group["lr"] * group["weight_decay"])
+                        p.add_(update, alpha=-group["lr"])
                 dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
 
 
@@ -97,6 +98,8 @@ class SingleDeviceMuon(torch.optim.Optimizer):
     def step(self):
         for group in self.param_groups:
             for p in group["params"]:
+                if p.grad is None:
+                    continue
                 state = self.state[p]
                 if len(state) == 0:
                     state["momentum_buffer"] = torch.zeros_like(p)
@@ -168,15 +171,18 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
                 for base_i in range(len(params))[::dist.get_world_size()]:
                     if base_i + dist.get_rank() < len(params):
                         p = params[base_i + dist.get_rank()]
-                        state = self.state[p]
-                        if len(state) == 0:
-                            state["momentum_buffer"] = torch.zeros_like(p)
-                        update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
-                        p.mul_(1 - group["lr"] * group["weight_decay"])
-                        p.add_(update, alpha=-group["lr"])
+                        if p.grad is not None:
+                            state = self.state[p]
+                            if len(state) == 0:
+                                state["momentum_buffer"] = torch.zeros_like(p)
+                            update = muon_update(p.grad, state["momentum_buffer"], beta=group["momentum"])
+                            p.mul_(1 - group["lr"] * group["weight_decay"])
+                            p.add_(update, alpha=-group["lr"])
                     dist.all_gather(params_pad[base_i:base_i + dist.get_world_size()], params_pad[base_i + dist.get_rank()])
             else:
                 for p in group["params"]:
+                    if p.grad is None:
+                        continue
                     state = self.state[p]
                     if len(state) == 0:
                         state["exp_avg"] = torch.zeros_like(p)
@@ -216,6 +222,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
         for group in self.param_groups:
             if group["use_muon"]:
                 for p in group["params"]:
+                    if p.grad is None:
+                        continue
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(p)
@@ -224,6 +232,8 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
                     p.add_(update, alpha=-group["lr"])
             else:
                 for p in group["params"]:
+                    if p.grad is None:
+                        continue
                     state = self.state[p]
                     if len(state) == 0:
                         state["exp_avg"] = torch.zeros_like(p)

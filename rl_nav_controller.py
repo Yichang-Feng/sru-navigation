@@ -353,6 +353,7 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('path_topic', getattr(constants, 'DEFAULT_PATH_TOPIC', '/global_path'))
         self.declare_parameter('stop_topic', getattr(constants, 'DEFAULT_STOP_TOPIC', '/mission/control'))
         self.declare_parameter('status_topic', getattr(constants, 'DEFAULT_STATUS_TOPIC', '/local_planner/status'))
+        self.declare_parameter('status_msgs_format', getattr(constants, 'DEFAULT_STATUS_MSGS_FORMAT', 'list'))
         self.declare_parameter('start_navi_topic', getattr(constants, 'DEFAULT_START_NAVI_TOPIC', '/startNavi'))
         self.declare_parameter('motion_enable_topic', getattr(constants, 'DEFAULT_MOTION_ENABLE_TOPIC', '/motion_enabled'))
         self.declare_parameter('odom_topic', getattr(constants, 'DEFAULT_ODOM_TOPIC', '/lio/robo/odom'))
@@ -366,17 +367,21 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('path_start_max_dist', getattr(constants, 'PATH_START_MAX_DIST', 2.5))
         self.declare_parameter('status_heartbeat_frequency', getattr(constants, 'STATUS_HEARTBEAT_FREQUENCY', 1.0))
         self.declare_parameter('camera_timeout', getattr(constants, 'CAMERA_TIMEOUT', 2.0))
+        self.declare_parameter('goal_reached_timeout', getattr(constants, 'DEFAULT_GOAL_REACHED_TIMEOUT', 1.0))
+        self.declare_parameter('report_failure', getattr(constants, 'REPORT_FAILURE', True))
         self.declare_parameter('path_frame_id', '')
 
         self.path_topic = str(self.get_parameter('path_topic').value)
         self.stop_topic = str(self.get_parameter('stop_topic').value)
         self.status_topic = str(self.get_parameter('status_topic').value)
+        self.status_msgs_format = str(self.get_parameter('status_msgs_format').value).strip().lower()
         self.start_navi_topic = str(self.get_parameter('start_navi_topic').value)
         self.motion_enable_topic = str(self.get_parameter('motion_enable_topic').value)
         self.odom_topic = str(self.get_parameter('odom_topic').value)
         self.cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
         self.auto_unlock_bridge = bool(self.get_parameter('auto_unlock_bridge').value)
         self.lookahead_distance = float(self.get_parameter('lookahead_distance').value)
+        self.report_failure = bool(self.get_parameter('report_failure').value)
         self.segment_arrive_threshold = float(self.get_parameter('segment_arrive_threshold').value)
         self.blocked_timeout = float(self.get_parameter('blocked_timeout').value)
         self.blocked_dist_threshold = float(self.get_parameter('blocked_dist_threshold').value)
@@ -384,6 +389,7 @@ class NavigationPolicyNode(Node):
         self.path_start_max_dist = float(self.get_parameter('path_start_max_dist').value)
         self.status_heartbeat_freq = float(self.get_parameter('status_heartbeat_frequency').value)
         self.camera_timeout = float(self.get_parameter('camera_timeout').value)
+        self.goal_reached_timeout = float(self.get_parameter('goal_reached_timeout').value)
         self.configured_path_frame_id = str(self.get_parameter('path_frame_id').value).strip()
 
         # Publishers
@@ -403,7 +409,7 @@ class NavigationPolicyNode(Node):
 
         # Global nav integration publishers (QoS: reliable + transient_local)
         status_qos = QoSProfile(
-            depth=1,
+            depth=10,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
@@ -460,6 +466,9 @@ class NavigationPolicyNode(Node):
         )
         self.cur_goal_subscriber = self.create_subscription(
             PoseStamped, '/cur_goal', self.target_position_callback, 10
+        )
+        self.goal_3d_subscriber = self.create_subscription(
+            PoseStamped, '/goal_3d', self.target_position_callback, 10
         )
 
         # Global path and mission control subscribers
@@ -746,23 +755,53 @@ class NavigationPolicyNode(Node):
                 elapsed = now - self.last_depth_time
 
             if elapsed > self.camera_timeout:
-                self._stop_robot()
-                self.set_state(
-                    NavState.ERROR,
-                    reason=f"ZED camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
-                    error_msg="zed_camera_lost"
-                )
-                self.get_logger().error(
-                    '\033[91m' +
-                    f'[Safety Watchdog] ZED camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
-                    '\033[0m'
-                )
+                if self.report_failure:
+                    self._stop_robot()
+                    self.set_state(
+                        NavState.ERROR,
+                        reason=f"ZED camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
+                        error_msg="zed_camera_lost"
+                    )
+                    self.get_logger().error(
+                        '\033[91m' +
+                        f'[Safety Watchdog] ZED camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
+                        '\033[0m'
+                    )
+                else:
+                    self.get_logger().warn(
+                        f'[Safety Watchdog] ZED camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
+                        throttle_duration_sec=3.0
+                    )
 
     def format_status_json(self) -> str:
-        """Format current state as standard JSON string: {"state":"...", "msgs":"..."}."""
+        """Format current state as standard JSON string per local_planner_status_diagram (1).html:
+        {"state":"<state>", "msgs":[]} (where msgs is a real JSON array []).
+        Compatible with multiple msgs styles via self.status_msgs_format:
+          - 'list' / 'array' (default): non-error -> [], error -> [error_msg]
+          - 'string_brackets': non-error -> "[]", error -> '["error_msg"]'
+          - 'empty_string': non-error -> "", error -> error_msg
+        """
+        curr_state_val = self.state.value
+        is_error = (self.state == NavState.ERROR and bool(self.error_msg))
+
+        # If failure reporting is suppressed by user request, never report 'error' or 'failed'
+        if not self.report_failure and self.state in (NavState.ERROR, NavState.FAILED):
+            curr_state_val = NavState.RUNNING.value if self.path_tracker.is_active() else NavState.IDLE.value
+            is_error = False
+
+        if self.status_msgs_format in ('string_brackets', 'string_array'):
+            msgs_val = json.dumps([self.error_msg]) if is_error else "[]"
+        elif self.status_msgs_format in ('empty_string', 'string_empty', 'empty'):
+            msgs_val = self.error_msg if is_error else ""
+        elif self.status_msgs_format == 'brackets_all':
+            msgs_val = f"[{self.error_msg}]" if is_error else "[]"
+        else:
+            # Default: 'list' (matches local_planner_status_diagram (1).html: msgs is real JSON array [])
+            msgs_val = [self.error_msg] if is_error else []
+
         status_dict = {
-            "state": self.state.value,
-            "msgs": self.error_msg if self.state == NavState.ERROR else ""
+            "state": curr_state_val,
+            "msgs": msgs_val
         }
         return json.dumps(status_dict, separators=(',', ':'))
 
@@ -774,10 +813,10 @@ class NavigationPolicyNode(Node):
 
     def publish_status_heartbeat(self):
         """Periodic 1Hz heartbeat to publish current state if unchanged.
-        Per specification: running / idle / stopped / error repeat at 1Hz; goal_reached only sent once and latched.
+        Per specification: running / idle / stopped / error repeat at 1Hz.
         """
-        if self.state == NavState.GOAL_REACHED and self.goal_reached_latched:
-            # goal_reached is published once upon arrival and latched; skip repeating in heartbeat
+        if self.state == NavState.GOAL_REACHED:
+            self.set_state(NavState.IDLE, reason="Auto transition to IDLE")
             return
         self.publish_status_message()
 
@@ -844,7 +883,7 @@ class NavigationPolicyNode(Node):
             path_msg: nav_msgs/msg/Path message.
         """
         # Reject path if in fatal unrecovered sensor error (e.g. camera lost)
-        if self.state == NavState.ERROR and (self.last_depth_time is None or time.time() - self.last_depth_time > self.camera_timeout):
+        if self.report_failure and self.state == NavState.ERROR and (self.last_depth_time is None or time.time() - self.last_depth_time > self.camera_timeout):
             self._stop_robot()
             self.get_logger().error(
                 '\033[91m' +
@@ -930,17 +969,26 @@ class NavigationPolicyNode(Node):
         self.path_tracker.set_path(pts, terminal_yaw=terminal_yaw)
         self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
 
-        # 5) State transition to RUNNING
-        self.set_state(
-            NavState.RUNNING,
-            reason=f"New path segment loaded ({len(pts)} points, {self.path_tracker.total_length:.2f}m)"
-        )
-        self.get_logger().info(
-            '\033[92m' +
-            f'Received new path segment: {len(pts)} points, total_length={self.path_tracker.total_length:.2f}m, ' +
-            f'start=[{pts[0][0]:.2f}, {pts[0][1]:.2f}], terminal=[{pts[-1][0]:.2f}, {pts[-1][1]:.2f}]' +
-            '\033[0m'
-        )
+        # 5) State transition to RUNNING (unless currently STOPPED)
+        if self.state == NavState.STOPPED:
+            self._stop_robot()
+            self.get_logger().info(
+                '\033[93m' +
+                f'Received new path segment ({len(pts)} points, {self.path_tracker.total_length:.2f}m) while STOPPED: ' +
+                'retained path updated in memory. Robot remains STOPPED until "resume".' +
+                '\033[0m'
+            )
+        else:
+            self.set_state(
+                NavState.RUNNING,
+                reason=f"New path segment loaded ({len(pts)} points, {self.path_tracker.total_length:.2f}m)"
+            )
+            self.get_logger().info(
+                '\033[92m' +
+                f'Received new path segment: {len(pts)} points, total_length={self.path_tracker.total_length:.2f}m, ' +
+                f'start=[{pts[0][0]:.2f}, {pts[0][1]:.2f}], terminal=[{pts[-1][0]:.2f}, {pts[-1][1]:.2f}]' +
+                '\033[0m'
+            )
 
     def depth_callback(self, depth_msg: Image):
         """Process depth image and trigger policy execution.
@@ -1065,22 +1113,29 @@ class NavigationPolicyNode(Node):
                     f'[Path] Arrived at segment terminal goal! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
                     '\033[0m'
                 )
+                self.set_state(NavState.IDLE, reason="Goal reached reported, immediate transition to IDLE")
                 return
 
             # Check if blocked / stalled against obstacles -> Transition to FAILED
             robot_vel_xy = self.linear_vel[:2] if self.linear_vel else [0.0, 0.0]
             if self.blocked_detector.update(self.robot_odom_time, progress_s, robot_vel_xy):
-                self._stop_robot()
-                self.set_state(
-                    NavState.FAILED,
-                    reason=f"Stalled: progress < {self.blocked_dist_threshold}m and vel < {self.blocked_vel_threshold}m/s for {self.blocked_timeout}s"
-                )
-                self.get_logger().warn(
-                    '\033[91m' +
-                    f'[Path] Robot is BLOCKED / STALLED! Stopped moving, state -> FAILED (awaiting upper layer replan or intervention).' +
-                    '\033[0m'
-                )
-                return
+                if self.report_failure:
+                    self._stop_robot()
+                    self.set_state(
+                        NavState.FAILED,
+                        reason=f"Stalled: progress < {self.blocked_dist_threshold}m and vel < {self.blocked_vel_threshold}m/s for {self.blocked_timeout}s"
+                    )
+                    self.get_logger().warn(
+                        '\033[91m' +
+                        f'[Path] Robot is BLOCKED / STALLED! Stopped moving, state -> FAILED (awaiting upper layer replan or intervention).' +
+                        '\033[0m'
+                    )
+                    return
+                else:
+                    self.get_logger().info(
+                        f'[Path] Robot currently stalled/slow near obstacle ({self.blocked_timeout:.1f}s), continuing obstacle avoidance (report_failure=False)...',
+                        throttle_duration_sec=3.0
+                    )
 
             # Extract dynamic lookahead carrot point along the path
             carrot_pt, carrot_yaw = self.path_tracker.get_lookahead_point(lookahead_dist=self.lookahead_distance)
@@ -1095,7 +1150,7 @@ class NavigationPolicyNode(Node):
         elif self.target_pos_w is None:
             # No path and no target: stop
             self._stop_robot()
-            if self.state == NavState.RUNNING:
+            if self.state in (NavState.RUNNING, NavState.GOAL_REACHED):
                 self.set_state(NavState.IDLE, reason="No active target or path")
             return
         else:
@@ -1110,6 +1165,7 @@ class NavigationPolicyNode(Node):
                 self.last_action = self._reset_last_action()
                 self.set_state(NavState.GOAL_REACHED, reason="Single goal reached")
                 self.get_logger().info('Target reached: Target position reset, state -> GOAL_REACHED.')
+                self.set_state(NavState.IDLE, reason="Single goal reached reported, immediate transition to IDLE")
                 return
 
         # 3) Joystick timeout logic
@@ -1224,10 +1280,18 @@ class NavigationPolicyNode(Node):
         self.joy_active = True
         self.cmd_vel_ratio = (1.0 + joy_msg.axes[4]) * 1.0
 
-        if joy_msg.buttons[constants.BUTTON_ABORT] == 1:
-            self.is_abort_goal = True
-            self.set_state(NavState.STOPPED, reason="Joystick abort button pressed")
-            self.get_logger().warn('Abort goal: State set to STOPPED')
+        btn_pause = getattr(constants, 'BUTTON_PAUSE', 1)  # Button B (暂停/急停)
+        btn_start = getattr(constants, 'BUTTON_START', 0)  # Button A (启动/恢复)
+        btn_abort = getattr(constants, 'BUTTON_ABORT', 1)
+
+        # 1. 按钮 B (Pause / Stop): 暂停导航并即时刹停 (保持当前路径不清除)
+        if (len(joy_msg.buttons) > btn_pause and joy_msg.buttons[btn_pause] == 1) or \
+           (len(joy_msg.buttons) > btn_abort and joy_msg.buttons[btn_abort] == 1):
+            self.set_state(NavState.STOPPED, reason="Joystick B button (Pause/Stop) pressed")
+            self._stop_robot()
+            self.get_logger().warn(
+                '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0).\033[0m'
+            )
 
         dx, dy, dz = self._moving_xyz_with_buttons(joy_msg, scale=constants.MOVING_SCALE)
         self.moving_goal_delta[0] += dx
@@ -1237,29 +1301,58 @@ class NavigationPolicyNode(Node):
         current_time = time.time()
         cooldown = constants.TRIGGER_BUTTON_COOLDOWN
 
+        # 2. 按钮 A (Start / Resume): 启动导航或从暂停状态恢复
+        if (current_time - self.last_trigger_time) > cooldown and \
+           len(joy_msg.buttons) > btn_start and joy_msg.buttons[btn_start] == 1:
+            self.last_trigger_time = current_time
+            self.is_abort_goal = False
+            self.unlock_chassis()
+
+            if self.path_tracker.has_path():
+                # Realign path tracker to current robot pose before resuming
+                pos_in_frame, _ = self.get_robot_pose_in_frame('map')
+                pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+                if pos_check is not None:
+                    self.path_tracker.realign_to_robot(pos_check[:2])
+
+                self.set_state(NavState.RUNNING, reason="Joystick A button (Resume Path) pressed")
+                self.get_logger().info(
+                    '\033[92m[Joystick] Button A pressed: Resumed global path navigation with realigned progress!\033[0m'
+                )
+            elif self.target_pos_w is not None or self.last_target_pos is not None:
+                if self.target_pos_w is None and self.last_target_pos is not None:
+                    self.target_pos_w = list(self.last_target_pos)
+                self.set_state(NavState.RUNNING, reason="Joystick A button (Start/Resume Goal) pressed")
+                self.get_logger().info(
+                    '\033[92m' +
+                    f'[Joystick] Button A pressed: Started/Resumed goal navigation to [{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}]!' +
+                    '\033[0m'
+                )
+            elif self.waypoint_manager.has_home_waypoints():
+                self.get_logger().info('\033[92m[Joystick] Button A pressed: Starting home waypoint sequence!\033[0m')
+                self.waypoint_manager.start_home_waypoint_sequence()
+            elif self.waypoint_manager.has_inversed_waypoints():
+                self.get_logger().info('\033[92m[Joystick] Button A pressed: Starting inversed waypoint sequence!\033[0m')
+                self.waypoint_manager.start_inversed_waypoint_sequence()
+            else:
+                self.get_logger().info(
+                    '\033[93m[Joystick] Button A pressed: Chassis unlocked, waiting for target goal or path.\033[0m'
+                )
+
         if not self.is_abort_goal and (current_time - self.last_trigger_time) > cooldown and \
-           joy_msg.buttons[constants.BUTTON_SEND_GOAL] == 1:
+           len(joy_msg.buttons) > constants.BUTTON_SEND_GOAL and joy_msg.buttons[constants.BUTTON_SEND_GOAL] == 1:
             self.get_logger().warn('Trigger moving goal')
             self._publish_moving_goal()
             self.last_trigger_time = current_time
 
         if (current_time - self.last_trigger_time) > cooldown and \
-           joy_msg.buttons[constants.BUTTON_RECORD_WAYPOINT] == 1:
+           len(joy_msg.buttons) > constants.BUTTON_RECORD_WAYPOINT and joy_msg.buttons[constants.BUTTON_RECORD_WAYPOINT] == 1:
             self.waypoint_manager.record_waypoint(self.robot_pos_w)
             self.last_trigger_time = current_time
 
         if (current_time - self.last_trigger_time) > cooldown and \
-           joy_msg.buttons[constants.BUTTON_CLEAR_WAYPOINT] == 1:
+           len(joy_msg.buttons) > constants.BUTTON_CLEAR_WAYPOINT and joy_msg.buttons[constants.BUTTON_CLEAR_WAYPOINT] == 1:
             self.waypoint_manager.remove_last_waypoint()
-            self.last_trigger_time = current_time
-
-        if not self.is_abort_goal and (current_time - self.last_trigger_time) > cooldown and \
-           joy_msg.buttons[constants.BUTTON_TRIGGER_WAYPOINTS] == 1:
-            self.get_logger().warn('Trigger waypoints')
-            if self.waypoint_manager.has_home_waypoints():
-                self.waypoint_manager.start_home_waypoint_sequence()
-            elif self.waypoint_manager.has_inversed_waypoints():
-                self.waypoint_manager.start_inversed_waypoint_sequence()
             self.last_trigger_time = current_time
 
         if joy_msg.axes[constants.JOYSTICK_AXIS_SMART] < -0.5:
@@ -1651,10 +1744,13 @@ def main(args=None):
     parser.add_argument('--stop-topic', type=str, default=None, help='Mission control topic name (default: /mission/control)')
     parser.add_argument('--control-topic', type=str, default=None, help='Mission control topic alias (default: /mission/control)')
     parser.add_argument('--status-topic', type=str, default=None, help='Local planner status topic name (default: /local_planner/status)')
+    parser.add_argument('--status-msgs-format', type=str, default=None, choices=['string_brackets', 'list', 'empty_string', 'brackets_all'], help='Format for msgs in status JSON: string_brackets ("[]"), list ([]), empty_string ("")')
     parser.add_argument('--cmd-vel-topic', type=str, default=None, help='Velocity command topic name (default: /cmd_vel)')
     parser.add_argument('--motion-enable-topic', type=str, default=None, help='Chassis motion enable topic name (default: /motion_enabled)')
     parser.add_argument('--odom-topic', type=str, default=None, help='Robot odometry topic name (default: /lio/robo/odom)')
     parser.add_argument('--lookahead-distance', type=float, default=None, help='Dynamic lookahead distance in meters (default: 2.0)')
+    parser.add_argument('--report-failure', dest='report_failure', action='store_true', default=None, help='Enable reporting FAILED/ERROR states (default: True)')
+    parser.add_argument('--no-report-failure', dest='report_failure', action='store_false', help='Disable reporting FAILED/ERROR states')
     parser.add_argument('--segment-arrive-threshold', type=float, default=None, help='Segment arrival distance threshold in meters (default: 0.15)')
     parser.add_argument('--blocked-timeout', type=float, default=None, help='Stall detection timeout in seconds (default: 4.0)')
     known_args, ros_args = parser.parse_known_args(args=args)
@@ -1688,6 +1784,8 @@ def main(args=None):
         navigation_policy_node.stop_topic = known_args.stop_topic
     if known_args.status_topic:
         navigation_policy_node.status_topic = known_args.status_topic
+    if known_args.status_msgs_format:
+        navigation_policy_node.status_msgs_format = known_args.status_msgs_format
     if known_args.cmd_vel_topic:
         navigation_policy_node.cmd_vel_topic = known_args.cmd_vel_topic
     if known_args.motion_enable_topic:
@@ -1696,6 +1794,8 @@ def main(args=None):
         navigation_policy_node.odom_topic = known_args.odom_topic
     if known_args.lookahead_distance is not None:
         navigation_policy_node.lookahead_distance = known_args.lookahead_distance
+    if known_args.report_failure is not None:
+        navigation_policy_node.report_failure = known_args.report_failure
     if known_args.segment_arrive_threshold is not None:
         navigation_policy_node.segment_arrive_threshold = known_args.segment_arrive_threshold
     elif known_args.arrive_threshold is not None:
@@ -1707,7 +1807,8 @@ def main(args=None):
     navigation_policy_node.get_logger().info(
         f'RL Navigation launched in {"SIMULATION" if use_sim else "REAL-HARDWARE"} mode. '
         f'Segment arrive threshold: {navigation_policy_node.segment_arrive_threshold:.3f}m, '
-        f'Lookahead: {navigation_policy_node.lookahead_distance:.2f}m'
+        f'Lookahead: {navigation_policy_node.lookahead_distance:.2f}m, '
+        f'Report failure: {navigation_policy_node.report_failure}'
     )
     navigation_policy_node.get_logger().info(
         '\033[92m' + f'Active navigation policy model: {policy_model_path}' + '\033[0m'

@@ -74,6 +74,7 @@ sru_nav_learning/
 
 # Benchmark evaluation outputs
 benchmark_results/
+door_diagnostics/
 
 # Handover and internal documentation
 AGENT_HANDOVER.md
