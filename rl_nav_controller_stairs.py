@@ -44,10 +44,14 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.declare_parameter('enable_stair_remapping', False)      # Whether to remap depth image on stairs (default False: raw depth)
         self.declare_parameter('stair_slope_threshold', -0.20)       # dz / ds_2d (approx. >11.5° drop, allows advance detection)
         self.declare_parameter('stair_lookahead_eval_dist', 1.2)     # Evaluation window ahead (meters)
-        self.declare_parameter('stair_exit_slope_threshold', -0.10)  # Level ground threshold
+        self.declare_parameter('stair_exit_slope_threshold', -0.10)  # Level ground threshold when descending
         self.declare_parameter('stair_exit_dist_threshold', 0.6)     # Distance on flat ground before exit
         self.declare_parameter('stair_min_elevation_drop', 0.15)     # Minimum z drop (meters, single step)
-        self.declare_parameter('stair_lookahead_dist', 0.40)          # Clamped lookahead on stairs (meters, default: 0.40m)
+        self.declare_parameter('stair_lookahead_dist', 0.40)          # Clamped lookahead on descending stairs (meters, default: 0.40m)
+        self.declare_parameter('stair_up_lookahead_dist', 0.45)       # Clamped lookahead on ascending stairs (meters, default: 0.45m)
+        self.declare_parameter('stair_up_slope_threshold', 0.20)     # dz / ds_2d for stair ascent (approx. >11.5° up, default: +0.20)
+        self.declare_parameter('stair_up_min_elevation_gain', 0.15)  # Minimum z gain for stair ascent (meters, single step rise, default: 0.15m)
+        self.declare_parameter('stair_up_exit_slope_threshold', 0.10)# Level ground threshold when ascending (default: +0.10)
         self.declare_parameter('stair_min_forward_vel', 0.0)          # Minimum forward velocity floor during stair descent (m/s, default 0.0: no hard override)
         self.declare_parameter('stair_ramp_base', 1.0)               # Bottom row virtual depth (meters)
         self.declare_parameter('stair_ramp_step', 0.046)             # Increment per row upwards
@@ -59,6 +63,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.enable_stairs_mode = bool(self.get_parameter('enable_stairs_mode').value)
         self.enable_stair_remapping = bool(self.get_parameter('enable_stair_remapping').value)
         self.stair_lookahead_dist = float(self.get_parameter('stair_lookahead_dist').value)
+        self.stair_up_lookahead_dist = float(self.get_parameter('stair_up_lookahead_dist').value)
         self.stair_min_forward_vel = float(self.get_parameter('stair_min_forward_vel').value)
 
         # Ensure segment_arrive_threshold is realistically tuned for quadruped stair/terrain navigation (default 0.45m)
@@ -72,7 +77,10 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             lookahead_eval_dist=float(self.get_parameter('stair_lookahead_eval_dist').value),
             exit_slope_threshold=float(self.get_parameter('stair_exit_slope_threshold').value),
             exit_dist_threshold=float(self.get_parameter('stair_exit_dist_threshold').value),
-            min_elevation_drop=float(self.get_parameter('stair_min_elevation_drop').value)
+            min_elevation_drop=float(self.get_parameter('stair_min_elevation_drop').value),
+            up_slope_threshold=float(self.get_parameter('stair_up_slope_threshold').value),
+            min_elevation_gain=float(self.get_parameter('stair_up_min_elevation_gain').value),
+            exit_up_slope_threshold=float(self.get_parameter('stair_up_exit_slope_threshold').value)
         )
 
         # Initialize StairsDepthRemapper
@@ -89,16 +97,20 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         )
 
         self._prev_stair_state = False
+        self._prev_stair_up_state = False
 
         # Diagnostic publishers
         self.is_stair_pub = self.create_publisher(Bool, '/nav/is_descending_stairs', 10)
+        self.is_stair_up_pub = self.create_publisher(Bool, '/nav/is_ascending_stairs', 10)
         self.remapped_depth_pub = self.create_publisher(Image, '/nav/remapped_depth', 1)
 
         self.get_logger().info(
             '\033[92m' +
             f'[StairsNav] Initialized Stairs-Aware Controller: enable={self.enable_stairs_mode}, '
-            f'stair_L={self.stair_lookahead_dist}m, remapping={self.enable_stair_remapping}, '
-            f'slope_thresh={self.slope_gate.slope_threshold:.2f}, '
+            f'stair_down_L={self.stair_lookahead_dist}m, stair_up_L={self.stair_up_lookahead_dist}m, '
+            f'remapping={self.enable_stair_remapping}, '
+            f'down_slope_thresh={self.slope_gate.slope_threshold:.2f}, '
+            f'up_slope_thresh={self.slope_gate.up_slope_threshold:.2f}, '
             f'side_clamp={self.depth_remapper.side_min_clamp:.2f}m' +
             '\033[0m'
         )
@@ -107,6 +119,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         """Reset stair slope gate on new path arrival and delegate to parent."""
         self.slope_gate.reset()
         self._prev_stair_state = False
+        self._prev_stair_up_state = False
         super().global_path_callback(path_msg)
 
     def generate_cmd_vel(self):
@@ -145,6 +158,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         pos_for_tracking = None
         ori_for_tracking = None
         is_stair_down = False
+        is_stair_up = False
         gate_info = {}
 
         # 2) Path Tracking Mode
@@ -180,14 +194,18 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
 
             # --- STAIRS SLOPE GATE EVALUATION ---
             if self.enable_stairs_mode:
-                is_stair_down, gate_info = self.slope_gate.evaluate(self.path_tracker, current_progress=progress_s)
+                is_stair_down, is_stair_up, gate_info = self.slope_gate.evaluate(self.path_tracker, current_progress=progress_s)
                 
-                # Publish diagnostic boolean
-                stair_msg = Bool()
-                stair_msg.data = bool(is_stair_down)
-                self.is_stair_pub.publish(stair_msg)
+                # Publish diagnostic booleans
+                stair_down_msg = Bool()
+                stair_down_msg.data = bool(is_stair_down)
+                self.is_stair_pub.publish(stair_down_msg)
 
-                # Transition logging
+                stair_up_msg = Bool()
+                stair_up_msg.data = bool(is_stair_up)
+                self.is_stair_up_pub.publish(stair_up_msg)
+
+                # Transition logging for descent
                 if is_stair_down != self._prev_stair_state:
                     if is_stair_down:
                         self.get_logger().info(
@@ -205,8 +223,25 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         )
                     self._prev_stair_state = is_stair_down
 
+                # Transition logging for ascent
+                if is_stair_up != self._prev_stair_up_state:
+                    if is_stair_up:
+                        self.get_logger().info(
+                            '\033[96m' +
+                            f'[StairsNav] >>> ENTERING STAIR ASCENT <<< Slope={gate_info.get("slope", 0.0):.2f}, '
+                            f'dz={gate_info.get("dz", 0.0):.2f}m. Latching lookahead L={self.stair_up_lookahead_dist}m.' +
+                            '\033[0m'
+                        )
+                    else:
+                        self.get_logger().info(
+                            '\033[96m' +
+                            f'[StairsNav] <<< EXITING STAIR ASCENT >>> Path returned to flat ground. Resuming standard lookahead.' +
+                            '\033[0m'
+                        )
+                    self._prev_stair_up_state = is_stair_up
+
             # Blocked / stall check
-            if is_stair_down:
+            if is_stair_down or is_stair_up:
                 # In terrain mode on stairs, walking velocity is slow. Keep blocked detector from false abort.
                 self.blocked_detector.reset(self.robot_odom_time, progress_s)
             else:
@@ -281,6 +316,18 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                 self.get_logger().info(
                     f'[StairsNav][DESCENT] L={self.stair_lookahead_dist:.2f}m, slope={gate_info.get("slope", 0.0):.2f}, '
                     f'dz={gate_info.get("dz", 0.0):.2f}m, carrot_z_drop={z_drop:.2f}m',
+                    throttle_duration_sec=1.0
+                )
+            elif is_stair_up:
+                # Suppress narrow passage latching so lookahead does not collapse to 0.5m or expand to 2.0m
+                self.path_tracker.is_in_narrow_passage = False
+                carrot_pt, carrot_yaw = self.path_tracker.get_lookahead_point(lookahead_dist=self.stair_up_lookahead_dist)
+                self.target_pos_w = carrot_pt
+                self.target_yaw_w = carrot_yaw
+                z_rise = carrot_pt[2] - pos_for_tracking[2] if carrot_pt is not None and pos_for_tracking is not None else 0.0
+                self.get_logger().info(
+                    f'[StairsNav][ASCENT] L={self.stair_up_lookahead_dist:.2f}m, slope={gate_info.get("slope", 0.0):.2f}, '
+                    f'dz={gate_info.get("dz", 0.0):.2f}m, carrot_z_rise={z_rise:.2f}m',
                     throttle_duration_sec=1.0
                 )
             elif self.enable_adaptive_lookahead and hasattr(self.path_tracker, 'get_adaptive_lookahead_point'):
@@ -387,7 +434,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         ])
 
         # Door speed boost only applies on flat-ground doors, NEVER on stairs!
-        if not is_stair_down and getattr(self.path_tracker, 'is_in_narrow_passage', False) and self.door_speed_boost > 0.0:
+        if not is_stair_down and not is_stair_up and getattr(self.path_tracker, 'is_in_narrow_passage', False) and self.door_speed_boost > 0.0:
             if target_vec_b is not None:
                 tv = np.array(target_vec_b).flatten()
                 if len(tv) >= 2:
@@ -395,10 +442,10 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                     if abs(yaw_err) < math.radians(20.0) and model_cmd[0] < self.door_speed_boost:
                         model_cmd[0] = self.door_speed_boost
 
-        # Stair descent anti-reversal & stability guard:
+        # Stair descent & ascent anti-reversal & stability guard:
         # Prevent backward motion on stairs while allowing policy to freely decelerate and stop (vx >= 0.0).
         # NEVER impose a hard positive forward velocity floor!
-        if is_stair_down:
+        if is_stair_down or is_stair_up:
             if model_cmd[0] < 0.0:
                 model_cmd[0] = 0.0
             # Limit rotational spin rate on stairs to prevent violent turns into side railings
@@ -419,9 +466,10 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             twist, self.robot_odom_time, self.robot_frame_id, self.twist_marker_publisher
         )
 
-        if is_stair_down:
+        if is_stair_down or is_stair_up:
+            mode_tag = "DESCENT" if is_stair_down else "ASCENT"
             self.get_logger().info(
-                f'[StairsNav][CMD] vx={twist.linear.x:.3f}m/s, vy={twist.linear.y:.3f}m/s, wz={twist.angular.z:.3f}rad/s',
+                f'[StairsNav][{mode_tag}_CMD] vx={twist.linear.x:.3f}m/s, vy={twist.linear.y:.3f}m/s, wz={twist.angular.z:.3f}rad/s',
                 throttle_duration_sec=1.0
             )
 
@@ -460,11 +508,14 @@ def main(args=None):
     parser.add_argument('--no-stairs-mode', dest='enable_stairs_mode', action='store_false', help='Disable stairs descent support')
     parser.add_argument('--enable-stair-remapping', dest='enable_stair_remapping', action='store_true', default=None, help='Enable depth remapping on stairs')
     parser.add_argument('--no-stair-remapping', dest='enable_stair_remapping', action='store_false', help='Disable depth remapping on stairs (raw depth mode)')
-    parser.add_argument('--stair-lookahead', type=float, default=None, help='Lookahead distance on stairs (default: 0.40m)')
+    parser.add_argument('--stair-lookahead', type=float, default=None, help='Lookahead distance on descending stairs (default: 0.40m)')
+    parser.add_argument('--stair-up-lookahead', type=float, default=None, help='Lookahead distance on ascending stairs (default: 0.45m)')
     parser.add_argument('--stair-min-forward-vel', type=float, default=None, help='Minimum forward velocity floor on stairs (default: 0.0m/s)')
     parser.add_argument('--stair-slope-thresh', type=float, default=None, help='Slope threshold for stair descent (default: -0.20)')
+    parser.add_argument('--stair-up-slope-thresh', type=float, default=None, help='Slope threshold for stair ascent (default: +0.20)')
     parser.add_argument('--stair-side-clamp', type=float, default=None, help='Side railing column min clamp (default: 0.50m)')
     parser.add_argument('--stair-min-drop', type=float, default=None, help='Minimum elevation drop for stair descent (default: 0.15m)')
+    parser.add_argument('--stair-up-min-gain', type=float, default=None, help='Minimum elevation gain for stair ascent (default: 0.15m)')
 
     known_args, ros_args = parser.parse_known_args(args=args)
     rclpy.init(args=ros_args)
@@ -537,20 +588,30 @@ def main(args=None):
         node.enable_stair_remapping = known_args.enable_stair_remapping
     if known_args.stair_lookahead is not None:
         node.stair_lookahead_dist = known_args.stair_lookahead
+    if known_args.stair_up_lookahead is not None:
+        node.stair_up_lookahead_dist = known_args.stair_up_lookahead
     if known_args.stair_min_forward_vel is not None:
         node.stair_min_forward_vel = known_args.stair_min_forward_vel
     if known_args.stair_slope_thresh is not None:
         node.slope_gate.slope_threshold = known_args.stair_slope_thresh
+    if known_args.stair_up_slope_thresh is not None:
+        node.slope_gate.up_slope_threshold = known_args.stair_up_slope_thresh
     if known_args.stair_side_clamp is not None:
         node.depth_remapper.side_min_clamp = known_args.stair_side_clamp
     if known_args.stair_min_drop is not None:
         node.slope_gate.min_elevation_drop = known_args.stair_min_drop
+    if known_args.stair_up_min_gain is not None:
+        node.slope_gate.min_elevation_gain = known_args.stair_up_min_gain
 
     node.get_logger().info(
         f'RL Navigation (Stairs-Aware) running. Stairs: {node.enable_stairs_mode} '
-        f'(stair_L={node.stair_lookahead_dist:.2f}m, remapping={node.enable_stair_remapping}, '
-        f'slope_thresh={node.slope_gate.slope_threshold:.2f}, '
-        f'min_drop={node.slope_gate.min_elevation_drop:.2f}m, side_clamp={node.depth_remapper.side_min_clamp:.2f}m)'
+        f'(down_L={node.stair_lookahead_dist:.2f}m, up_L={node.stair_up_lookahead_dist:.2f}m, '
+        f'remapping={node.enable_stair_remapping}, '
+        f'down_slope_thresh={node.slope_gate.slope_threshold:.2f}, '
+        f'up_slope_thresh={node.slope_gate.up_slope_threshold:.2f}, '
+        f'min_drop={node.slope_gate.min_elevation_drop:.2f}m, '
+        f'min_gain={node.slope_gate.min_elevation_gain:.2f}m, '
+        f'side_clamp={node.depth_remapper.side_min_clamp:.2f}m)'
     )
 
     try:

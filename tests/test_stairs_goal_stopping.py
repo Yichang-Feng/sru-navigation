@@ -106,12 +106,116 @@ def test_slope_gate_exit_at_terminal_flat_segment():
     ]
     tracker.set_path(path, frame_id="map")
     tracker.update_progress([5.0, 0.0])
-    is_down, _ = gate.evaluate(tracker, current_progress=0.0)
+    is_down, is_up, _ = gate.evaluate(tracker, current_progress=0.0)
     assert is_down, "Should detect stair descent at beginning"
+    assert not is_up, "Should NOT detect stair ascent on downward stairs"
 
     tracker.update_progress([0.85, 0.0])
-    is_down_term, info = gate.evaluate(tracker)
+    is_down_term, is_up_term, info = gate.evaluate(tracker)
     assert not is_down_term, "Should exit stair descent at flat terminal landing"
+    assert not is_up_term, "Should not be ascending at terminal landing"
+
+
+def test_stair_ascent_detection_and_terminal_exit():
+    """Verify that StairsSlopeGate detects stair ascent and exits at terminal flat landing."""
+    gate = StairsSlopeGate(up_slope_threshold=0.20, min_elevation_gain=0.15, exit_up_slope_threshold=0.10)
+    tracker = AdaptivePathSegmentTracker()
+    path = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.35],
+        [2.0, 0.0, 0.70],
+        [3.0, 0.0, 1.05],
+        [4.0, 0.0, 1.05],
+        [4.5, 0.0, 1.05]
+    ]
+    tracker.set_path(path, frame_id="map")
+    tracker.update_progress([0.0, 0.0])
+    is_down, is_up, info = gate.evaluate(tracker, current_progress=0.0)
+    assert is_up, "Should detect stair ascent on positive slope path"
+    assert not is_down, "Should NOT detect stair descent on upward path"
+
+    # Move near terminal goal on flat landing
+    tracker.update_progress([4.35, 0.0])
+    is_down_term, is_up_term, info_term = gate.evaluate(tracker)
+    assert not is_up_term, "Should exit stair ascent at flat terminal landing"
+
+
+def test_three_modes_lookahead_switching():
+    """Verify automatic lookahead selection across Flat Ground, Downward Stairs, and Upward Stairs."""
+    gate = StairsSlopeGate(slope_threshold=-0.20, up_slope_threshold=0.20, min_elevation_drop=0.15, min_elevation_gain=0.15)
+    tracker = AdaptivePathSegmentTracker(lookahead_min=0.5, lookahead_max=2.0)
+
+    stair_down_lookahead = 0.40
+    stair_up_lookahead = 0.45
+
+    def get_effective_lookahead(path_points, current_robot_xy):
+        tracker.set_path(path_points, frame_id="map")
+        progress = tracker.update_progress(current_robot_xy)
+        is_down, is_up, _ = gate.evaluate(tracker, current_progress=progress)
+
+        if is_down:
+            return stair_down_lookahead, "STAIR_DOWN"
+        elif is_up:
+            return stair_up_lookahead, "STAIR_UP"
+        else:
+            _, _, info = tracker.get_adaptive_lookahead_point()
+            return info.get("lookahead", tracker.lookahead_max), "FLAT_ADAPTIVE"
+
+    # Scenario 1: Straight Flat Ground Path -> Should use flat adaptive lookahead (up to 2.0m)
+    flat_path = [[x * 0.5, 0.0, 0.0] for x in range(20)]
+    L_flat, mode_flat = get_effective_lookahead(flat_path, [2.0, 0.0])
+    assert mode_flat == "FLAT_ADAPTIVE", f"Expected FLAT_ADAPTIVE, got {mode_flat}"
+    assert L_flat >= 0.5 and L_flat <= 2.0, f"Flat lookahead ({L_flat}) should be in [0.5, 2.0]"
+
+    # Scenario 2: Downward Stairs (dz = -0.35 * dx) -> Should latch 0.40m
+    gate.reset()
+    down_path = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, -0.35],
+        [2.0, 0.0, -0.70],
+        [3.0, 0.0, -1.05],
+        [4.0, 0.0, -1.40]
+    ]
+    L_down, mode_down = get_effective_lookahead(down_path, [0.0, 0.0])
+    assert mode_down == "STAIR_DOWN", f"Expected STAIR_DOWN, got {mode_down}"
+    assert math.isclose(L_down, 0.40, abs_tol=1e-3), f"Expected 0.40m on downward stairs, got {L_down}"
+
+    # Scenario 3: Upward Stairs (dz = +0.35 * dx) -> Should latch 0.45m
+    gate.reset()
+    up_path = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, +0.35],
+        [2.0, 0.0, +0.70],
+        [3.0, 0.0, +1.05],
+        [4.0, 0.0, +1.40]
+    ]
+    L_up, mode_up = get_effective_lookahead(up_path, [0.0, 0.0])
+    assert mode_up == "STAIR_UP", f"Expected STAIR_UP, got {mode_up}"
+    assert math.isclose(L_up, 0.45, abs_tol=1e-3), f"Expected 0.45m on upward stairs, got {L_up}"
+
+
+def test_ascent_anti_reversal_and_angular_clip():
+    """Verify velocity guard for ascending stairs: vx >= 0.0 and |wz| <= 0.5."""
+    is_stair_up = True
+    is_stair_down = False
+
+    cmd_negative = np.array([-0.30, 0.05, 0.80])
+    if is_stair_down or is_stair_up:
+        if cmd_negative[0] < 0.0:
+            cmd_negative[0] = 0.0
+        cmd_negative[2] = float(np.clip(cmd_negative[2], -0.5, 0.5))
+
+    assert math.isclose(cmd_negative[0], 0.0, abs_tol=1e-5), "Must clamp reverse velocity to 0 on ascending stairs"
+    assert math.isclose(cmd_negative[2], 0.5, abs_tol=1e-5), "Must clamp angular velocity to 0.5 rad/s on ascending stairs"
+
+    cmd_forward = np.array([0.38, -0.02, -0.20])
+    if is_stair_down or is_stair_up:
+        if cmd_forward[0] < 0.0:
+            cmd_forward[0] = 0.0
+        cmd_forward[2] = float(np.clip(cmd_forward[2], -0.5, 0.5))
+
+    assert math.isclose(cmd_forward[0], 0.38, abs_tol=1e-5), "Must preserve forward velocity on ascending stairs"
+    assert math.isclose(cmd_forward[2], -0.20, abs_tol=1e-5), "Must preserve safe angular velocity"
 
 
 def test_stair_raw_depth_toggle():
@@ -136,5 +240,8 @@ if __name__ == '__main__':
     test_depth_remapper_preserves_wall_at_terminal_goal()
     test_defensive_safety_guard_near_terminal_goal()
     test_slope_gate_exit_at_terminal_flat_segment()
+    test_stair_ascent_detection_and_terminal_exit()
+    test_three_modes_lookahead_switching()
+    test_ascent_anti_reversal_and_angular_clip()
     test_stair_raw_depth_toggle()
     print('ALL UNIT TESTS PASSED!')

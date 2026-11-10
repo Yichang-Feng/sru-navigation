@@ -12,35 +12,45 @@ import cv2
 
 
 class StairsSlopeGate:
-    """Detects when the robot is entering, descending, and exiting stairs based on 3D path geometry."""
+    """Detects when the robot is entering, descending, ascending, and exiting stairs based on 3D path geometry."""
 
     def __init__(
         self,
-        slope_threshold: float = -0.20,      # Slope threshold (dz / ds_2d) for stair descent (approx. >11.5° down, allows ~0.5m advance detection)
-        lookahead_eval_dist: float = 1.2,    # Lookahead distance ahead to evaluate path slope (meters)
-        exit_slope_threshold: float = -0.10, # Slope above which path is considered level/flat again
-        exit_dist_threshold: float = 0.6,     # Distance robot must travel on flat surface before releasing stair latch
-        min_elevation_drop: float = 0.15,    # Minimum total z-drop across eval window to confirm stairs (meters, single step drop)
+        slope_threshold: float = -0.20,        # Slope threshold (dz / ds_2d) for stair descent (approx. >11.5° down, allows ~0.5m advance detection)
+        lookahead_eval_dist: float = 1.2,      # Lookahead distance ahead to evaluate path slope (meters)
+        exit_slope_threshold: float = -0.10,   # Slope above which path is considered level/flat again when descending
+        exit_dist_threshold: float = 0.6,       # Distance robot must travel on flat surface before releasing stair latch
+        min_elevation_drop: float = 0.15,      # Minimum total z-drop across eval window to confirm descending stairs (meters, single step drop)
+        up_slope_threshold: float = 0.20,      # Slope threshold (dz / ds_2d) for stair ascent (approx. >11.5° up)
+        min_elevation_gain: float = 0.15,      # Minimum total z-gain across eval window to confirm ascending stairs (meters, single step rise)
+        exit_up_slope_threshold: float = 0.10, # Slope below which path is considered level/flat again when ascending
     ):
         self.slope_threshold = float(slope_threshold)
         self.lookahead_eval_dist = float(lookahead_eval_dist)
         self.exit_slope_threshold = float(exit_slope_threshold)
         self.exit_dist_threshold = float(exit_dist_threshold)
         self.min_elevation_drop = float(min_elevation_drop)
+        self.up_slope_threshold = float(up_slope_threshold)
+        self.min_elevation_gain = float(min_elevation_gain)
+        self.exit_up_slope_threshold = float(exit_up_slope_threshold)
 
         # Dynamic state
         self.is_descending_stairs = False
+        self.is_ascending_stairs = False
         self.stair_entry_progress = 0.0
         self.flat_ground_entry_progress = None
         self.consecutive_slope_detections = 0
+        self.consecutive_up_slope_detections = 0
         self.required_consecutive_detections = 1
 
     def reset(self):
         """Reset internal latching state."""
         self.is_descending_stairs = False
+        self.is_ascending_stairs = False
         self.stair_entry_progress = 0.0
         self.flat_ground_entry_progress = None
         self.consecutive_slope_detections = 0
+        self.consecutive_up_slope_detections = 0
 
     def evaluate(self, path_tracker, current_progress: float = None):
         """Evaluate 3D path slope ahead of the robot.
@@ -50,15 +60,15 @@ class StairsSlopeGate:
             current_progress: Optional arc-length progress along path. If None, uses tracker.current_progress.
 
         Returns:
-            tuple: (is_descending_stairs: bool, debug_dict: dict)
+            tuple: (is_descending_stairs: bool, is_ascending_stairs: bool, debug_dict: dict)
         """
         if path_tracker is None or not hasattr(path_tracker, 'is_active') or not path_tracker.is_active():
             self.reset()
-            return False, {"mode": "inactive", "slope": 0.0, "is_descending": False}
+            return False, False, {"mode": "inactive", "slope": 0.0, "is_descending": False, "is_ascending": False}
 
         if len(path_tracker.points) < 2:
             self.reset()
-            return False, {"mode": "single_point", "slope": 0.0, "is_descending": False}
+            return False, False, {"mode": "single_point", "slope": 0.0, "is_descending": False, "is_ascending": False}
 
         s_curr = current_progress if current_progress is not None else getattr(path_tracker, 'current_progress', 0.0)
         s_total = getattr(path_tracker, 'total_length', 0.0)
@@ -66,24 +76,39 @@ class StairsSlopeGate:
         # Ensure we have enough path ahead to evaluate
         eval_window = min(self.lookahead_eval_dist, max(0.0, s_total - s_curr))
         if eval_window < 0.3:
-            # Reached near terminal goal: check if remaining path elevation drop is flat
+            # Reached near terminal goal: check if remaining path elevation drop/gain is flat
             p_curr, _ = path_tracker.get_lookahead_point(lookahead_dist=0.0)
             p_term = path_tracker.points[-1]
             dz_term = float(p_term[2] - p_curr[2]) if p_curr is not None else 0.0
-            if dz_term > -self.min_elevation_drop or (s_total - s_curr < 0.2):
-                # Terminal segment is level ground or robot is at end of path: exit stair descent
-                self.is_descending_stairs = False
-                self.flat_ground_entry_progress = None
-            elif self.is_descending_stairs and self.flat_ground_entry_progress is None:
-                self.flat_ground_entry_progress = s_curr
-            if self.flat_ground_entry_progress is not None and (s_curr - self.flat_ground_entry_progress >= self.exit_dist_threshold):
-                self.is_descending_stairs = False
-                self.flat_ground_entry_progress = None
-            return self.is_descending_stairs, {
+
+            # Descent terminal handling
+            if self.is_descending_stairs:
+                if dz_term > -self.min_elevation_drop or (s_total - s_curr < 0.2):
+                    self.is_descending_stairs = False
+                    self.flat_ground_entry_progress = None
+                elif self.flat_ground_entry_progress is None:
+                    self.flat_ground_entry_progress = s_curr
+                if self.flat_ground_entry_progress is not None and (s_curr - self.flat_ground_entry_progress >= self.exit_dist_threshold):
+                    self.is_descending_stairs = False
+                    self.flat_ground_entry_progress = None
+
+            # Ascent terminal handling
+            if self.is_ascending_stairs:
+                if dz_term < self.min_elevation_gain or (s_total - s_curr < 0.2):
+                    self.is_ascending_stairs = False
+                    self.flat_ground_entry_progress = None
+                elif self.flat_ground_entry_progress is None:
+                    self.flat_ground_entry_progress = s_curr
+                if self.flat_ground_entry_progress is not None and (s_curr - self.flat_ground_entry_progress >= self.exit_dist_threshold):
+                    self.is_ascending_stairs = False
+                    self.flat_ground_entry_progress = None
+
+            return self.is_descending_stairs, self.is_ascending_stairs, {
                 "mode": "near_terminal",
                 "slope": 0.0,
                 "dz": dz_term,
-                "is_descending": self.is_descending_stairs
+                "is_descending": self.is_descending_stairs,
+                "is_ascending": self.is_ascending_stairs
             }
 
         # Query 3D carrot points at current position and future evaluation point
@@ -91,7 +116,11 @@ class StairsSlopeGate:
         p_future, _ = path_tracker.get_lookahead_point(lookahead_dist=eval_window)
 
         if p_curr is None or p_future is None:
-            return self.is_descending_stairs, {"mode": "lookup_fail", "slope": 0.0, "is_descending": self.is_descending_stairs}
+            return self.is_descending_stairs, self.is_ascending_stairs, {
+                "mode": "lookup_fail", "slope": 0.0,
+                "is_descending": self.is_descending_stairs,
+                "is_ascending": self.is_ascending_stairs
+            }
 
         dz = float(p_future[2] - p_curr[2])
         d_xy = float(math.hypot(p_future[0] - p_curr[0], p_future[1] - p_curr[1]))
@@ -99,8 +128,8 @@ class StairsSlopeGate:
         slope = dz / (d_xy + 1e-5)
 
         # State transition logic with hysteresis
-        if not self.is_descending_stairs:
-            # Entry condition: slope < threshold and sufficient z drop
+        if not self.is_descending_stairs and not self.is_ascending_stairs:
+            # Entry condition for descent: slope < threshold and sufficient z drop
             if slope < self.slope_threshold and dz < -self.min_elevation_drop:
                 self.consecutive_slope_detections += 1
                 if self.consecutive_slope_detections >= self.required_consecutive_detections:
@@ -109,8 +138,18 @@ class StairsSlopeGate:
                     self.flat_ground_entry_progress = None
             else:
                 self.consecutive_slope_detections = 0
-        else:
-            # Exit condition: future slope becomes level again
+
+            # Entry condition for ascent: slope >= threshold and sufficient z gain
+            if slope >= self.up_slope_threshold and dz >= self.min_elevation_gain:
+                self.consecutive_up_slope_detections += 1
+                if self.consecutive_up_slope_detections >= self.required_consecutive_detections:
+                    self.is_ascending_stairs = True
+                    self.stair_entry_progress = s_curr
+                    self.flat_ground_entry_progress = None
+            else:
+                self.consecutive_up_slope_detections = 0
+        elif self.is_descending_stairs:
+            # Exit condition for descent: future slope becomes level again
             if slope > self.exit_slope_threshold:
                 if self.flat_ground_entry_progress is None:
                     self.flat_ground_entry_progress = s_curr
@@ -119,7 +158,19 @@ class StairsSlopeGate:
                     self.flat_ground_entry_progress = None
                     self.consecutive_slope_detections = 0
             else:
-                # Still on steep stairs, reset exit counter
+                # Still on steep downward stairs, reset exit counter
+                self.flat_ground_entry_progress = None
+        elif self.is_ascending_stairs:
+            # Exit condition for ascent: future slope becomes level again
+            if slope < self.exit_up_slope_threshold:
+                if self.flat_ground_entry_progress is None:
+                    self.flat_ground_entry_progress = s_curr
+                elif (s_curr - self.flat_ground_entry_progress) >= self.exit_dist_threshold:
+                    self.is_ascending_stairs = False
+                    self.flat_ground_entry_progress = None
+                    self.consecutive_up_slope_detections = 0
+            else:
+                # Still on steep upward stairs, reset exit counter
                 self.flat_ground_entry_progress = None
 
         debug_info = {
@@ -128,9 +179,11 @@ class StairsSlopeGate:
             "d_xy": d_xy,
             "eval_window": eval_window,
             "is_descending": self.is_descending_stairs,
-            "consecutive": self.consecutive_slope_detections
+            "is_ascending": self.is_ascending_stairs,
+            "consecutive_down": self.consecutive_slope_detections,
+            "consecutive_up": self.consecutive_up_slope_detections
         }
-        return self.is_descending_stairs, debug_info
+        return self.is_descending_stairs, self.is_ascending_stairs, debug_info
 
 
 class StairsDepthRemapper:

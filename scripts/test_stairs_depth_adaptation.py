@@ -52,9 +52,10 @@ def test_flat_ground_zero_impact():
 
 
 def test_stairs_slope_gate_synthetic_paths():
-    """Verify StairsSlopeGate accurately triggers on 3D stairs and stays idle on flat paths."""
+    """Verify StairsSlopeGate accurately triggers on 3D stairs (descent and ascent) and stays idle on flat paths."""
     print("\n[Test 2] Testing 3D Path Slope Gate on Synthetic Paths...")
-    gate = StairsSlopeGate(slope_threshold=-0.30, lookahead_eval_dist=1.2, exit_slope_threshold=-0.10)
+    gate = StairsSlopeGate(slope_threshold=-0.30, lookahead_eval_dist=1.2, exit_slope_threshold=-0.10,
+                           up_slope_threshold=0.20, min_elevation_gain=0.15, exit_up_slope_threshold=0.10)
     tracker = PathSegmentTracker()
 
     # Case A: Pure flat path (e.g. 10m hallway)
@@ -63,8 +64,9 @@ def test_stairs_slope_gate_synthetic_paths():
 
     for step in range(20):
         tracker.update_progress([step * 0.2, 0.0])
-        is_stair, info = gate.evaluate(tracker)
-        assert not is_stair, f"False positive: Triggered stair descent on flat path at s={tracker.current_progress:.2f}m!"
+        is_down, is_up, info = gate.evaluate(tracker)
+        assert not is_down, f"False positive: Triggered stair descent on flat path at s={tracker.current_progress:.2f}m!"
+        assert not is_up, f"False positive: Triggered stair ascent on flat path at s={tracker.current_progress:.2f}m!"
     print("  [✓] PASSED: Flat path test - 0 false positives across entire path.")
 
     # Case B: Flat hallway -> 3D Stairs Down -> Flat Landing
@@ -92,8 +94,9 @@ def test_stairs_slope_gate_synthetic_paths():
     for s in np.arange(0.0, 7.5, 0.1):
         pt, _ = tracker.get_lookahead_point(lookahead_dist=(s - tracker.current_progress))
         tracker.update_progress(pt[:2])
-        is_stair, info = gate.evaluate(tracker)
-        if is_stair:
+        is_down, is_up, info = gate.evaluate(tracker)
+        assert not is_up, f"False positive: Triggered stair ascent on downward stairs at s={s:.2f}m!"
+        if is_down:
             triggered_positions.append(s)
         else:
             if len(triggered_positions) > 0 and len(exited_positions) == 0:
@@ -102,9 +105,42 @@ def test_stairs_slope_gate_synthetic_paths():
     assert len(triggered_positions) > 0, "Failed to trigger stair descent on 3D stairs!"
     entry_s = triggered_positions[0]
     exit_s = exited_positions[0] if exited_positions else 7.5
+    print(f"  [✓] PASSED: 3D Stairs Down detected at s={entry_s:.2f}m, exited to flat ground at s={exit_s:.2f}m.")
 
-    # Should trigger right around s=1.0m ~ 2.0m (looking ahead 1.2m into stairs)
-    print(f"  [✓] PASSED: 3D Stairs detected at s={entry_s:.2f}m, exited to flat ground at s={exit_s:.2f}m.")
+    # Case C: Flat hallway -> 3D Stairs Up -> Flat Upper Landing
+    # 0m..2m: flat (z=0.0)
+    # 2m..5m: stairs up (dz = +1.2m over 3m dx -> slope = +0.40)
+    # 5m..8m: flat upper landing (z=+1.2)
+    gate.reset()
+    stair_up_path = []
+    for x in np.arange(0.0, 2.0, 0.2):
+        stair_up_path.append([float(x), 0.0, 0.0])
+    for x in np.arange(2.0, 5.0, 0.2):
+        dz = 0.4 * (x - 2.0)
+        stair_up_path.append([float(x), 0.0, float(dz)])
+    for x in np.arange(5.0, 8.2, 0.2):
+        stair_up_path.append([float(x), 0.0, 1.2])
+
+    tracker.set_path(stair_up_path)
+
+    triggered_up = []
+    exited_up = []
+
+    for s in np.arange(0.0, 7.5, 0.1):
+        pt, _ = tracker.get_lookahead_point(lookahead_dist=(s - tracker.current_progress))
+        tracker.update_progress(pt[:2])
+        is_down, is_up, info = gate.evaluate(tracker)
+        assert not is_down, f"False positive: Triggered stair descent on upward stairs at s={s:.2f}m!"
+        if is_up:
+            triggered_up.append(s)
+        else:
+            if len(triggered_up) > 0 and len(exited_up) == 0:
+                exited_up.append(s)
+
+    assert len(triggered_up) > 0, "Failed to trigger stair ascent on 3D stairs!"
+    entry_up_s = triggered_up[0]
+    exit_up_s = exited_up[0] if exited_up else 7.5
+    print(f"  [✓] PASSED: 3D Stairs Up detected at s={entry_up_s:.2f}m, exited to flat ground at s={exit_up_s:.2f}m.")
 
 
 def test_real_obstacle_preservation():

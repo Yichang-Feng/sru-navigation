@@ -42,8 +42,10 @@ SEGMENT_ARRIVE_THRESHOLD="0.45"
 ENABLE_STAIRS="true"
 ENABLE_STAIR_REMAPPING="false"  # 默认关闭深度重映射，仅保留楼梯前瞻点 0.4m 切换测试
 STAIR_LOOKAHEAD="0.4"
+STAIR_UP_LOOKAHEAD="0.45"
 STAIR_MIN_VEL="0.0"
 STAIR_SLOPE_THRESH="-0.20"
+STAIR_UP_SLOPE_THRESH="0.20"
 STAIR_SIDE_CLAMP="0.50"
 STAIR_MIN_DROP="0.15"
 
@@ -64,10 +66,12 @@ show_help() {
     echo "  --max <距离>        平地自适应前瞻上界 (默认 2.0m)"
     echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.45m)"
     echo "  --stair-lookahead <距离> 楼梯下楼前瞻锁存距离 (默认 0.4m, 策略前进最优响应点)"
+    echo "  --stair-up-lookahead <距离> 楼梯上楼前瞻锁存距离 (默认 0.45m, 避免上楼目标梯度稀释)"
     echo "  --remapping         开启楼梯深度图重映射处理 (默认关闭: 纯原始深度图测试)"
     echo "  --no-remapping      关闭楼梯深度图重映射处理 (默认: 纯原始深度图测试)"
     echo "  --stair-min-vel <速度>   下楼保底推进线速度 (默认 0.0m/s, 纯依靠策略网络输出)"
     echo "  --stair-slope <斜率>     触发下楼判定坡度阈值 (默认 -0.20, 提前约 0.5m 判定下楼)"
+    echo "  --stair-up-slope <斜率>  触发上楼判定坡度阈值 (默认 +0.20, 提前约 0.5m 判定上楼)"
     echo "  --stair-side-clamp <距离> 扶手侧边栏杆距离钳位 (默认 0.50m)"
     echo "  --stair-min-drop <高度>   触发下楼最小落差阈值 (默认 0.15m, 单阶落差)"
     echo "  --no-stairs         禁用楼梯深度图重映射与坡度门控"
@@ -112,6 +116,10 @@ while [[ $# -gt 0 ]]; do
             STAIR_LOOKAHEAD="$2"
             shift 2
             ;;
+        --stair-up-lookahead)
+            STAIR_UP_LOOKAHEAD="$2"
+            shift 2
+            ;;
         --remapping|--enable-remapping)
             ENABLE_STAIR_REMAPPING="true"
             shift
@@ -122,6 +130,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --stair-slope)
             STAIR_SLOPE_THRESH="$2"
+            shift 2
+            ;;
+        --stair-up-slope)
+            STAIR_UP_SLOPE_THRESH="$2"
             shift 2
             ;;
         --stair-side-clamp)
@@ -219,7 +231,7 @@ fi
 
 echo "=================================================================="
 echo ">>> Unitree Go2W 楼梯感知与双因子自适应导航系统启动器"
-echo ">>> 楼梯感知使能: $ENABLE_STAIRS [前瞻锁存: ${STAIR_LOOKAHEAD}m, 深度重映射: ${ENABLE_STAIR_REMAPPING}, 坡度阈值: ${STAIR_SLOPE_THRESH}, 到达阈值: ${SEGMENT_ARRIVE_THRESHOLD}m]"
+echo ">>> 楼梯感知使能: $ENABLE_STAIRS [下楼前瞻: ${STAIR_LOOKAHEAD}m, 上楼前瞻: ${STAIR_UP_LOOKAHEAD}m, 深度重映射: ${ENABLE_STAIR_REMAPPING}, 下坡阈值: ${STAIR_SLOPE_THRESH}, 上坡阈值: ${STAIR_UP_SLOPE_THRESH}, 到达阈值: ${SEGMENT_ARRIVE_THRESHOLD}m]"
 echo ">>> 平地前瞻自适应使能: $ENABLE_ADAPTIVE [模式: $ADAPTIVE_MODE, 范围: ${LOOKAHEAD_MIN}m ~ ${LOOKAHEAD_MAX}m]"
 echo ">>> 容错模式: $REPORT_FAILURE, 自动打开 RViz: $ENABLE_RVIZ"
 echo "=================================================================="
@@ -275,8 +287,10 @@ if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
         -p enable_stairs_mode:=${ENABLE_STAIRS} \
         -p enable_stair_remapping:=${ENABLE_STAIR_REMAPPING} \
         -p stair_lookahead_dist:=${STAIR_LOOKAHEAD} \
+        -p stair_up_lookahead_dist:=${STAIR_UP_LOOKAHEAD} \
         -p stair_min_forward_vel:=${STAIR_MIN_VEL} \
         -p stair_slope_threshold:=${STAIR_SLOPE_THRESH} \
+        -p stair_up_slope_threshold:=${STAIR_UP_SLOPE_THRESH} \
         -p stair_side_min_clamp:=${STAIR_SIDE_CLAMP} \
         -p stair_min_elevation_drop:=${STAIR_MIN_DROP} \
         -p enable_adaptive_lookahead:=${ENABLE_ADAPTIVE} \
@@ -360,7 +374,7 @@ fi
 echo ""
 echo "=================================================================="
 echo ">>> Unitree Go2W 楼梯感知与双因子自适应导航系统启动完成！"
-echo ">>> 下楼梯诊断监控: ros2 topic echo /nav/is_descending_stairs"
+echo ">>> 楼梯诊断监控: ros2 topic echo /nav/is_descending_stairs  |  ros2 topic echo /nav/is_ascending_stairs"
 echo ">>> 手柄操作: [A] 启动/恢复导航  |  [B] 暂停刹停"
 echo ">>> 停止运行: ./stop_nav.sh"
 echo "=================================================================="
