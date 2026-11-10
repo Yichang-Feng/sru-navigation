@@ -1068,6 +1068,10 @@ class NavigationPolicyNode(Node):
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):
             self._stop_robot()
+            # If in STOPPED state and path is present, keep blocked_detector window refreshed
+            # so pausing does not accumulate stale stationary time into stall timeout
+            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
             return
 
         # Check aborted goal
@@ -1287,10 +1291,16 @@ class NavigationPolicyNode(Node):
         # 1. 按钮 B (Pause / Stop): 暂停导航并即时刹停 (保持当前路径不清除)
         if (len(joy_msg.buttons) > btn_pause and joy_msg.buttons[btn_pause] == 1) or \
            (len(joy_msg.buttons) > btn_abort and joy_msg.buttons[btn_abort] == 1):
+            self.is_abort_goal = False
             self.set_state(NavState.STOPPED, reason="Joystick B button (Pause/Stop) pressed")
             self._stop_robot()
+            if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker'):
+                self.blocked_detector.reset(
+                    self.robot_odom_time,
+                    self.path_tracker.current_progress if self.path_tracker.has_path() else 0.0
+                )
             self.get_logger().warn(
-                '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0).\033[0m'
+                '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0, path retained).\033[0m'
             )
 
         dx, dy, dz = self._moving_xyz_with_buttons(joy_msg, scale=constants.MOVING_SCALE)
@@ -1306,6 +1316,7 @@ class NavigationPolicyNode(Node):
            len(joy_msg.buttons) > btn_start and joy_msg.buttons[btn_start] == 1:
             self.last_trigger_time = current_time
             self.is_abort_goal = False
+            self.goal_reached_latched = False
             self.unlock_chassis()
 
             if self.path_tracker.has_path():
@@ -1314,6 +1325,10 @@ class NavigationPolicyNode(Node):
                 pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
                 if pos_check is not None:
                     self.path_tracker.realign_to_robot(pos_check[:2])
+
+                # Reset blocked detector so resuming has a clean 4.0s stall detection window
+                if hasattr(self, 'blocked_detector'):
+                    self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
 
                 self.set_state(NavState.RUNNING, reason="Joystick A button (Resume Path) pressed")
                 self.get_logger().info(

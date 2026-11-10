@@ -57,7 +57,11 @@ echo "[✓] rl_nav_controller 源码与模型同步完成。"
 
 # 4. 同步更新后的全局启动和停止脚本 (不再推送任何 rviz 相关文件，避免触发 C++ 工具链)
 echo -e "\n[2/4] 同步 start_nav.sh / start_nav_custom.sh / stop_nav.sh 到机载 go2w_nav_ros2_ws..."
-scp "${LOCAL_WS}/start_nav.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav.sh"
+if [ -f "$WORKSPACE_DIR/scripts/start_nav.sh" ]; then
+    scp "$WORKSPACE_DIR/scripts/start_nav.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav.sh"
+else
+    scp "${LOCAL_WS}/start_nav.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav.sh"
+fi
 scp "${LOCAL_WS}/stop_nav.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/stop_nav.sh"
 
 if [ -f "$WORKSPACE_DIR/scripts/start_nav_custom.sh" ]; then

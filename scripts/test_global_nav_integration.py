@@ -328,14 +328,14 @@ def test_joystick_button_a_start_b_pause():
     sm.set_state(NavState.RUNNING, reason="Target set")
     assert sm.state == NavState.RUNNING
 
-    # Button B pressed -> Pause / Stop
+    # Button B pressed -> Pause / Stop (path retained, not aborted)
     btn_pause = 1
     joy_buttons_b = [0, 1, 0, 0]  # B=1
     if joy_buttons_b[btn_pause] == 1:
-        sm.is_abort_goal = True
+        sm.is_abort_goal = False
         sm.set_state(NavState.STOPPED, reason="Button B pressed")
     assert sm.state == NavState.STOPPED
-    assert sm.is_abort_goal is True
+    assert sm.is_abort_goal is False
 
     # Button A pressed -> Start / Resume
     btn_start = 0
@@ -347,7 +347,7 @@ def test_joystick_button_a_start_b_pause():
     assert sm.state == NavState.RUNNING
     assert sm.is_abort_goal is False
 
-    print("  -> Passed: Button B successfully paused/stopped, Button A successfully started/resumed.")
+    print("  -> Passed: Button B successfully paused/stopped (path retained), Button A successfully resumed.")
 
 
 def test_report_failure_suppression():

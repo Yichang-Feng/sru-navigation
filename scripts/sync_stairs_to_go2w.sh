@@ -40,7 +40,14 @@ scp "$WORKSPACE_DIR/rl_nav_controller_stairs.py" \
     "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py"
 
 # 3. 推送启动脚本与诊断工具
-echo -e "\n[2/4] 推送 start_nav_stairs.sh 与 door_diagnostic_logger.py..."
+echo -e "\n[2/4] 推送 start_nav.sh, start_nav_stairs.sh 与 door_diagnostic_logger.py..."
+if [ -f "$WORKSPACE_DIR/scripts/start_nav.sh" ]; then
+    scp "$WORKSPACE_DIR/scripts/start_nav.sh" \
+        "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav.sh"
+    ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/start_nav.sh"
+    echo "[✓] 已推送最新默认启动器 start_nav.sh"
+fi
+
 if [ -f "$WORKSPACE_DIR/scripts/start_nav_stairs.sh" ]; then
     scp "$WORKSPACE_DIR/scripts/start_nav_stairs.sh" \
         "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav_stairs.sh"

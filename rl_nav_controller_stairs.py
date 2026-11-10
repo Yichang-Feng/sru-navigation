@@ -126,6 +126,10 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):
             self._stop_robot()
+            # If in STOPPED state and path is present, keep blocked_detector window refreshed
+            # so pausing does not accumulate stale stationary time into stall timeout
+            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
             return
 
         if self.is_abort_goal:
@@ -133,8 +137,9 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             self._stop_robot()
             self.target_pos_w = None
             self.target_yaw_w = None
+            self.path_tracker.clear()
             self.is_abort_goal = False
-            self.set_state(NavState.IDLE, reason="Goal aborted")
+            self.set_state(NavState.STOPPED, reason="Goal aborted")
             return
 
         pos_for_tracking = None
