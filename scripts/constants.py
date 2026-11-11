@@ -68,3 +68,16 @@ WAYPOINTS_MARKER_ID = 3
 
 # Gravity constant
 GRAVITY = 9.81
+
+# Terminal Goal Arrival & Heading Alignment Defaults
+SEGMENT_ARRIVE_THRESHOLD = 0.20  # meters (realistic arrival radius for quadruped)
+DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN = True
+DEFAULT_TERMINAL_HEADING_TOL = 0.26  # ~15 degrees in radians
+DEFAULT_TERMINAL_HEADING_KP = 1.2
+DEFAULT_TERMINAL_HEADING_DEADBAND = 0.12  # rad/s to overcome static ground friction
+DEFAULT_TERMINAL_HEADING_MIN_VEL = 0.15   # rad/s
+DEFAULT_TERMINAL_HEADING_MAX_VEL = 0.45   # rad/s for smooth, non-jerky rotation
+DEFAULT_TERMINAL_HEADING_TIMEOUT = 5.0   # seconds
+DEFAULT_TERMINAL_HEADING_DRIFT_TOL = 0.40 # meters (position drift guard during in-place turning)
+DEFAULT_TERMINAL_HEADING_STABLE_FRAMES = 2 # frames
+

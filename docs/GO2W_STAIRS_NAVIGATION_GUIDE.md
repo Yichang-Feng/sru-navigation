@@ -109,7 +109,7 @@ $$\mathbf{p}_{\text{target}} = \left[ \frac{\Delta x_b}{d}, \frac{\Delta y_b}{d}
 - **彻底移除 0.35m/s 硬限制**: 允许策略网络自由减速到 $0.0\text{ m/s}$ 刹停；
 - **单向非负防倒车边界**: 上楼与下楼时均强制 $v_x \ge 0.0$，杜绝阶梯上挂倒档；
 - **角速度限幅**: $\omega_z \in [-0.5, 0.5]\text{ rad/s}$，抑制台阶上剧烈甩尾擦碰扶手与立柱；
-- **真实到达判定阈值**: `segment_arrive_threshold = 0.45m`（支持配置到 $0.50\text{m}$）。进入终点半径立即发布 `cmd_vel = 0`，清空路径，状态转移为 `GOAL_REACHED -> IDLE`。
+- **真实到达判定阈值**: `segment_arrive_threshold = 0.20m`（支持通过 `--arrive-thresh` 配置，原地漂移容差为 `0.40m`）。进入终点半径立即发布 `cmd_vel = 0`，清空路径，进入终点航向对齐或直接完成状态转移（`GOAL_REACHED -> IDLE`）。
 
 ---
 

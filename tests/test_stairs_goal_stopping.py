@@ -25,8 +25,14 @@ def test_goal_arrival_with_realistic_threshold():
     tracker.update_progress(robot_xy)
 
     assert not tracker.check_arrived(robot_xy, arrive_threshold=0.15), "0.15m was too strict"
+    assert not tracker.check_arrived(robot_xy, arrive_threshold=0.20), "0.454m distance should not trigger 0.20m arrival threshold"
     assert tracker.check_arrived(robot_xy, arrive_threshold=0.48), "0.48m threshold correctly triggers arrival"
     assert tracker.check_arrived(robot_xy, arrive_threshold=0.50), "0.50m threshold correctly triggers arrival"
+
+    # Robot closer within 0.20m radius
+    close_robot_xy = [1.50, 7.345]  # distance ~ 0.113m < 0.20m
+    tracker.update_progress(close_robot_xy)
+    assert tracker.check_arrived(close_robot_xy, arrive_threshold=0.20), "0.113m distance should trigger 0.20m arrival threshold"
 
 
 def test_no_hard_forward_velocity_floor():

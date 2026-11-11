@@ -298,6 +298,12 @@ class PathSegmentTracker:
         r_pos = np.array(robot_pos_xy[:2], dtype=np.float64)
         return float(np.linalg.norm(r_pos - self.points[-1][:2]))
 
+    def get_terminal_pose(self):
+        """Return (terminal_pt, terminal_yaw) if active, else (None, None)."""
+        if not self.is_active() or len(self.points) == 0:
+            return None, None
+        return self.points[-1].tolist(), self.terminal_yaw
+
 
 class AdaptivePathSegmentTracker(PathSegmentTracker):
     """Extended PathSegmentTracker with dual-factor adaptive lookahead:

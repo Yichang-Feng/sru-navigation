@@ -66,9 +66,9 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.stair_up_lookahead_dist = float(self.get_parameter('stair_up_lookahead_dist').value)
         self.stair_min_forward_vel = float(self.get_parameter('stair_min_forward_vel').value)
 
-        # Ensure segment_arrive_threshold is realistically tuned for quadruped stair/terrain navigation (default 0.45m)
+        # Ensure segment_arrive_threshold is realistically tuned for quadruped stair/terrain navigation (default 0.20m)
         if hasattr(self, 'arrive_goal_threshold') and self.arrive_goal_threshold is not None:
-            if getattr(self, 'segment_arrive_threshold', 0.15) <= 0.15:
+            if getattr(self, 'segment_arrive_threshold', 0.20) < 0.15:
                 self.segment_arrive_threshold = self.arrive_goal_threshold
 
         # Initialize StairsSlopeGate
@@ -99,6 +99,42 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self._prev_stair_state = False
         self._prev_stair_up_state = False
 
+        # Terminal Goal Heading Alignment parameters and state (defensive initialization)
+        if not self.has_parameter('enable_terminal_heading_align'):
+            self.declare_parameter('enable_terminal_heading_align', True)
+        if not self.has_parameter('terminal_heading_tol'):
+            self.declare_parameter('terminal_heading_tol', 0.26)
+        if not self.has_parameter('terminal_heading_kp'):
+            self.declare_parameter('terminal_heading_kp', 1.2)
+        if not self.has_parameter('terminal_heading_deadband'):
+            self.declare_parameter('terminal_heading_deadband', 0.12)
+        if not self.has_parameter('terminal_heading_min_vel'):
+            self.declare_parameter('terminal_heading_min_vel', 0.15)
+        if not self.has_parameter('terminal_heading_max_vel'):
+            self.declare_parameter('terminal_heading_max_vel', 0.45)
+        if not self.has_parameter('terminal_heading_timeout'):
+            self.declare_parameter('terminal_heading_timeout', 5.0)
+        if not self.has_parameter('terminal_heading_drift_tol'):
+            self.declare_parameter('terminal_heading_drift_tol', 0.40)
+        if not self.has_parameter('terminal_heading_stable_frames'):
+            self.declare_parameter('terminal_heading_stable_frames', 2)
+
+        self.enable_terminal_heading_align = bool(self.get_parameter('enable_terminal_heading_align').value)
+        self.terminal_heading_tol = float(self.get_parameter('terminal_heading_tol').value)
+        self.terminal_heading_kp = float(self.get_parameter('terminal_heading_kp').value)
+        self.terminal_heading_deadband = float(self.get_parameter('terminal_heading_deadband').value)
+        self.terminal_heading_min_vel = float(self.get_parameter('terminal_heading_min_vel').value)
+        self.terminal_heading_max_vel = float(self.get_parameter('terminal_heading_max_vel').value)
+        self.terminal_heading_timeout = float(self.get_parameter('terminal_heading_timeout').value)
+        self.terminal_heading_drift_tol = float(self.get_parameter('terminal_heading_drift_tol').value)
+        self.terminal_heading_stable_frames = int(self.get_parameter('terminal_heading_stable_frames').value)
+
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
+
         # Diagnostic publishers
         self.is_stair_pub = self.create_publisher(Bool, '/nav/is_descending_stairs', 10)
         self.is_stair_up_pub = self.create_publisher(Bool, '/nav/is_ascending_stairs', 10)
@@ -118,9 +154,126 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
     def global_path_callback(self, path_msg: Path):
         """Reset stair slope gate on new path arrival and delegate to parent."""
         self.slope_gate.reset()
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
         self._prev_stair_state = False
         self._prev_stair_up_state = False
         super().global_path_callback(path_msg)
+
+    def _finish_terminal_goal(self, reason="Terminal goal reached"):
+        """Finish the terminal goal, actively brake, clear tracking, and transition state."""
+        self._stop_robot()
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
+        self.path_tracker.clear()
+        self.target_pos_w = None
+        self.target_yaw_w = None
+        self.last_action = self._reset_last_action()
+        if hasattr(self, 'slope_gate'):
+            self.slope_gate.reset()
+        self.set_state(NavState.GOAL_REACHED, reason=reason)
+        self.get_logger().info(
+            '\033[92m' +
+            f'[Path] {reason}! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+            '\033[0m'
+        )
+        self.set_state(NavState.IDLE, reason="Goal reached reported, immediate transition to IDLE")
+
+    def _handle_terminal_heading_alignment(self, frame_id='map'):
+        """Execute smooth terminal heading alignment with deadband compensation and low-pass filtering."""
+        pos_in_frame, ori_in_frame = self.get_robot_pose_in_frame(frame_id) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
+        curr_robot_pos = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+        curr_robot_ori = ori_in_frame if ori_in_frame is not None else self.robot_orientation_w
+        if curr_robot_pos is None or curr_robot_ori is None:
+            self._stop_robot()
+            return
+
+        # 1. Timeout watchdog
+        if self.heading_align_start_time is not None and (self.robot_odom_time - self.heading_align_start_time > self.terminal_heading_timeout):
+            self.get_logger().warn(
+                f'[TerminalHeading] Alignment timeout ({self.terminal_heading_timeout:.1f}s exceeded). '
+                'Forcing stop and completing goal.'
+            )
+            self._finish_terminal_goal(reason="Terminal heading alignment timed out")
+            return
+
+        # 2. Position drift guard
+        if self.heading_align_terminal_pos is not None:
+            drift_dist = float(np.linalg.norm(
+                np.array(curr_robot_pos[:2]) - np.array(self.heading_align_terminal_pos[:2])
+            ))
+            if drift_dist > self.terminal_heading_drift_tol:
+                self.get_logger().warn(
+                    f'[TerminalHeading] Position drift detected ({drift_dist:.2f}m > {self.terminal_heading_drift_tol:.2f}m). '
+                    'Forcing stop and completing goal to prevent drift.'
+                )
+                self._finish_terminal_goal(reason=f"Terminal goal completed on drift threshold ({drift_dist:.2f}m)")
+                return
+
+        # 3. Calculate yaw error (wrap to [-pi, pi])
+        qw, qx, qy, qz = (
+            float(curr_robot_ori[0]), float(curr_robot_ori[1]),
+            float(curr_robot_ori[2]), float(curr_robot_ori[3])
+        )
+        robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        target_yaw = self.heading_align_target_yaw
+
+        yaw_err = math.atan2(math.sin(target_yaw - robot_yaw), math.cos(target_yaw - robot_yaw))
+
+        # 4. Check convergence
+        if abs(yaw_err) <= self.terminal_heading_tol:
+            self.heading_align_stable_count += 1
+            if self.heading_align_stable_count >= self.terminal_heading_stable_frames:
+                deg_err = math.degrees(abs(yaw_err))
+                self.get_logger().info(
+                    '\033[92m' +
+                    f'[TerminalHeading] Heading aligned! Error={deg_err:.1f}° <= {math.degrees(self.terminal_heading_tol):.1f}°. '
+                    '\033[0m'
+                )
+                self._finish_terminal_goal(
+                    reason=f"Terminal goal reached and heading aligned (err={deg_err:.1f}° <= {math.degrees(self.terminal_heading_tol):.1f}°)"
+                )
+                return
+        else:
+            self.heading_align_stable_count = 0
+
+        # 5. Smooth P control with deadband compensation and clamp
+        abs_err = abs(yaw_err)
+        sign = 1.0 if yaw_err >= 0.0 else -1.0
+        raw_wz = abs_err * self.terminal_heading_kp + self.terminal_heading_deadband
+        wz_mag = float(np.clip(raw_wz, self.terminal_heading_min_vel, self.terminal_heading_max_vel))
+        target_wz = sign * wz_mag
+
+        # Smooth low-pass filtering using constants.LOW_PASS_FILTER_COEF
+        filter_coef = np.array(constants.LOW_PASS_FILTER_COEF)
+        cmd_vec = np.array([0.0, 0.0, target_wz])
+        filt_model = filter_coef * cmd_vec + (1.0 - filter_coef) * self.prev_cmd
+        self.prev_cmd = filt_model
+
+        twist = Twist()
+        twist.linear.x = 0.0 + self.joy_linear_x
+        twist.linear.y = 0.0 + self.joy_linear_y
+        twist.angular.z = float(filt_model[2]) + self.joy_angular_z
+
+        self.cmd_vel_publisher.publish(twist)
+        self.cmd_vel_direct_publisher.publish(twist)
+
+        # Publish visualization markers
+        self.visualization_manager.publish_twist_marker(
+            twist, self.robot_odom_time, self.robot_frame_id, self.twist_marker_publisher
+        )
+
+        self.get_logger().info(
+            f'[TerminalHeading] Aligning: err={math.degrees(yaw_err):.1f}°, target_wz={target_wz:.2f}rad/s, filt_wz={twist.angular.z:.2f}rad/s',
+            throttle_duration_sec=0.5
+        )
+
 
     def generate_cmd_vel(self):
         """Generate velocity commands with 3D stair gating and depth remapping."""
@@ -139,6 +292,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):
             self._stop_robot()
+            self.is_aligning_heading = False
             # If in STOPPED state and path is present, keep blocked_detector window refreshed
             # so pausing does not accumulate stale stationary time into stall timeout
             if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
@@ -148,11 +302,18 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         if self.is_abort_goal:
             self.get_logger().warn('Goal aborted, stopping robot.')
             self._stop_robot()
+            self.is_aligning_heading = False
             self.target_pos_w = None
             self.target_yaw_w = None
             self.path_tracker.clear()
             self.is_abort_goal = False
             self.set_state(NavState.STOPPED, reason="Goal aborted")
+            return
+
+        # Check active terminal heading alignment phase
+        if getattr(self, 'is_aligning_heading', False):
+            frame_id = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
+            self._handle_terminal_heading_alignment(frame_id=frame_id)
             return
 
         pos_for_tracking = None
@@ -174,23 +335,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
 
             robot_xy = pos_for_tracking[:2]
             progress_s = self.path_tracker.update_progress(robot_xy)
-
-            # Check if reached terminal goal of current segment
-            if self.path_tracker.check_arrived(robot_xy, arrive_threshold=self.segment_arrive_threshold):
-                self._stop_robot()
-                self.path_tracker.clear()
-                self.target_pos_w = None
-                self.target_yaw_w = None
-                self.last_action = self._reset_last_action()
-                self.slope_gate.reset()
-                self.set_state(NavState.GOAL_REACHED, reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m)")
-                self.get_logger().info(
-                    '\033[92m' +
-                    f'[Path] Arrived at segment terminal goal! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
-                    '\033[0m'
-                )
-                self.set_state(NavState.IDLE, reason="Goal reached reported, immediate transition to IDLE")
-                return
 
             # --- STAIRS SLOPE GATE EVALUATION ---
             if self.enable_stairs_mode:
@@ -239,6 +383,65 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                             '\033[0m'
                         )
                     self._prev_stair_up_state = is_stair_up
+
+            # Check if reached terminal goal of current segment
+            if self.path_tracker.check_arrived(robot_xy, arrive_threshold=self.segment_arrive_threshold):
+                terminal_pt, terminal_yaw = self.path_tracker.get_terminal_pose()
+                need_heading_align = (
+                    self.enable_terminal_heading_align and
+                    terminal_yaw is not None and
+                    not is_stair_down and
+                    not is_stair_up
+                )
+
+                if need_heading_align:
+                    curr_ori = ori_for_tracking if ori_for_tracking is not None else self.robot_orientation_w
+                    robot_yaw = 0.0
+                    if curr_ori is not None:
+                        qw, qx, qy, qz = float(curr_ori[0]), float(curr_ori[1]), float(curr_ori[2]), float(curr_ori[3])
+                        robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+
+                    yaw_err = math.atan2(math.sin(terminal_yaw - robot_yaw), math.cos(terminal_yaw - robot_yaw))
+                    if abs(yaw_err) <= self.terminal_heading_tol:
+                        self.get_logger().info(
+                            '\033[92m' +
+                            f'[Path] Arrived at terminal goal and heading already within {math.degrees(self.terminal_heading_tol):.1f}° '
+                            f'(err={math.degrees(abs(yaw_err)):.1f}°). Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+                            '\033[0m'
+                        )
+                        self._finish_terminal_goal(
+                            reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m, heading within {math.degrees(self.terminal_heading_tol):.1f}°)"
+                        )
+                        return
+                    else:
+                        self._stop_robot()
+                        self.is_aligning_heading = True
+                        self.heading_align_target_yaw = terminal_yaw
+                        self.heading_align_terminal_pos = list(terminal_pt[:2]) if terminal_pt else list(robot_xy)
+                        self.heading_align_start_time = self.robot_odom_time
+                        self.heading_align_stable_count = 0
+                        self.path_tracker.clear()
+                        self.target_pos_w = None
+                        self.target_yaw_w = None
+                        self.last_action = self._reset_last_action()
+                        self.slope_gate.reset()
+                        self.get_logger().info(
+                            '\033[93m' +
+                            f'[Path] Arrived at terminal position (< {self.segment_arrive_threshold}m). '
+                            f'Current heading err={math.degrees(yaw_err):.1f}° > {math.degrees(self.terminal_heading_tol):.1f}°. '
+                            f'Entering terminal heading alignment phase (state stays RUNNING).' +
+                            '\033[0m'
+                        )
+                        return
+                else:
+                    stair_note = " (on stairs - spin prohibited)" if (is_stair_down or is_stair_up) else ""
+                    self.get_logger().info(
+                        '\033[92m' +
+                        f'[Path] Arrived at segment terminal goal!{stair_note} Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+                        '\033[0m'
+                    )
+                    self._finish_terminal_goal(reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m){stair_note}")
+                    return
 
             # Blocked / stall check
             if is_stair_down or is_stair_up:
@@ -517,6 +720,15 @@ def main(args=None):
     parser.add_argument('--stair-min-drop', type=float, default=None, help='Minimum elevation drop for stair descent (default: 0.15m)')
     parser.add_argument('--stair-up-min-gain', type=float, default=None, help='Minimum elevation gain for stair ascent (default: 0.15m)')
 
+    # Terminal heading alignment CLI arguments
+    parser.add_argument('--heading-align', dest='enable_terminal_heading_align', action='store_true', default=None, help='Enable terminal goal heading alignment')
+    parser.add_argument('--no-heading-align', dest='enable_terminal_heading_align', action='store_false', help='Disable terminal goal heading alignment')
+    parser.add_argument('--heading-tol', type=float, default=None, help='Heading alignment tolerance in radians (default: 0.26 rad ~ 15 deg)')
+    parser.add_argument('--heading-kp', type=float, default=None, help='Heading alignment proportional gain (default: 1.2)')
+    parser.add_argument('--heading-timeout', type=float, default=None, help='Heading alignment timeout watchdog in seconds (default: 5.0s)')
+    parser.add_argument('--heading-max-vel', type=float, default=None, help='Heading alignment maximum rotational velocity (default: 0.45 rad/s)')
+    parser.add_argument('--heading-min-vel', type=float, default=None, help='Heading alignment minimum rotational velocity (default: 0.15 rad/s)')
+
     known_args, ros_args = parser.parse_known_args(args=args)
     rclpy.init(args=ros_args)
     use_sim = known_args.sim
@@ -602,6 +814,20 @@ def main(args=None):
         node.slope_gate.min_elevation_drop = known_args.stair_min_drop
     if known_args.stair_up_min_gain is not None:
         node.slope_gate.min_elevation_gain = known_args.stair_up_min_gain
+
+    # Configure terminal heading alignment arguments
+    if known_args.enable_terminal_heading_align is not None:
+        node.enable_terminal_heading_align = known_args.enable_terminal_heading_align
+    if known_args.heading_tol is not None:
+        node.terminal_heading_tol = known_args.heading_tol
+    if known_args.heading_kp is not None:
+        node.terminal_heading_kp = known_args.heading_kp
+    if known_args.heading_timeout is not None:
+        node.terminal_heading_timeout = known_args.heading_timeout
+    if known_args.heading_max_vel is not None:
+        node.terminal_heading_max_vel = known_args.heading_max_vel
+    if known_args.heading_min_vel is not None:
+        node.terminal_heading_min_vel = known_args.heading_min_vel
 
     node.get_logger().info(
         f'RL Navigation (Stairs-Aware) running. Stairs: {node.enable_stairs_mode} '

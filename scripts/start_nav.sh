@@ -38,7 +38,7 @@ REPORT_FAILURE="true"           # 默认启用停滞报错上报 (标准状态�
 ENABLE_RVIZ=false               # 默认不自动弹出 RViz (按要求关闭)
 
 # 到达判定与楼梯感知特定参数
-SEGMENT_ARRIVE_THRESHOLD="0.45"
+SEGMENT_ARRIVE_THRESHOLD="0.20"
 ENABLE_STAIRS="true"
 ENABLE_STAIR_REMAPPING="false"  # 默认关闭深度重映射，仅保留楼梯前瞻点 0.4m 切换测试
 STAIR_LOOKAHEAD="0.4"
@@ -48,6 +48,10 @@ STAIR_SLOPE_THRESH="-0.20"
 STAIR_UP_SLOPE_THRESH="0.20"
 STAIR_SIDE_CLAMP="0.50"
 STAIR_MIN_DROP="0.15"
+
+# 终点航向对齐参数
+ENABLE_HEADING_ALIGN="true"     # 默认开启终点姿态对齐
+HEADING_TOL="0.26"              # 默认约 15 度容差 (弧度)
 
 # ==========================================
 # 命令行参数解析
@@ -64,7 +68,10 @@ show_help() {
     echo "  --mode <模式>        显式指定自适应模式: both | curvature_only | clearance_only | none"
     echo "  --min <距离>        平地自适应前瞻下界 (默认 0.5m)"
     echo "  --max <距离>        平地自适应前瞻上界 (默认 2.0m)"
-    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.45m)"
+    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.20m)"
+    echo "  --heading-align     开启终端航向对齐 (默认开启)"
+    echo "  --no-heading-align  禁用终端航向对齐 (到达坐标即完成)"
+    echo "  --heading-tol <弧度> 终端航向对齐容差 (默认 0.26 rad ≈ 15°)"
     echo "  --stair-lookahead <距离> 楼梯下楼前瞻锁存距离 (默认 0.4m, 策略前进最优响应点)"
     echo "  --stair-up-lookahead <距离> 楼梯上楼前瞻锁存距离 (默认 0.45m, 避免上楼目标梯度稀释)"
     echo "  --remapping         开启楼梯深度图重映射处理 (默认关闭: 纯原始深度图测试)"
@@ -110,6 +117,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --arrive-thresh|--arrive-threshold)
             SEGMENT_ARRIVE_THRESHOLD="$2"
+            shift 2
+            ;;
+        --heading-align)
+            ENABLE_HEADING_ALIGN="true"
+            shift
+            ;;
+        --no-heading-align)
+            ENABLE_HEADING_ALIGN="false"
+            shift
+            ;;
+        --heading-tol)
+            HEADING_TOL="$2"
             shift 2
             ;;
         --stair-lookahead)
@@ -300,6 +319,8 @@ if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
         -p adaptive_window_dist:=${WINDOW_DIST} \
         -p door_speed_boost:=${DOOR_SPEED_BOOST} \
         -p segment_arrive_threshold:=${SEGMENT_ARRIVE_THRESHOLD} \
+        -p enable_terminal_heading_align:=${ENABLE_HEADING_ALIGN} \
+        -p terminal_heading_tol:=${HEADING_TOL} \
         -p report_failure:=${REPORT_FAILURE}"
 
     # 自动兼容：优先检测 ros2 entrypoint，若尚未编译注册则无缝回退到 python3 源码直运

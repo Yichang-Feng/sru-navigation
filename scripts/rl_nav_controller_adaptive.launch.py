@@ -53,7 +53,7 @@ def generate_launch_description():
     report_failure_arg = DeclareLaunchArgument('report_failure', default_value='true', description='Whether to report and transition to error/failed state')
     report_failure = LaunchConfiguration('report_failure')
 
-    segment_arrive_threshold_arg = DeclareLaunchArgument('segment_arrive_threshold', default_value='0.15', description='Segment arrival distance threshold')
+    segment_arrive_threshold_arg = DeclareLaunchArgument('segment_arrive_threshold', default_value='0.20', description='Segment arrival distance threshold')
     segment_arrive_threshold = LaunchConfiguration('segment_arrive_threshold')
 
     blocked_timeout_arg = DeclareLaunchArgument('blocked_timeout', default_value='8.0', description='Stall detection timeout')

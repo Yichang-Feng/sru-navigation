@@ -376,7 +376,7 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('slew_rate_increase', 0.8)
         self.declare_parameter('passage_latch_dist', 1.2)
         self.declare_parameter('door_speed_boost', 0.35)
-        self.declare_parameter('segment_arrive_threshold', getattr(constants, 'SEGMENT_ARRIVE_THRESHOLD', 0.15))
+        self.declare_parameter('segment_arrive_threshold', getattr(constants, 'SEGMENT_ARRIVE_THRESHOLD', 0.20))
         self.declare_parameter('blocked_timeout', getattr(constants, 'BLOCKED_TIMEOUT', 4.0))
         self.declare_parameter('blocked_dist_threshold', getattr(constants, 'BLOCKED_DIST_THRESHOLD', 0.1))
         self.declare_parameter('blocked_vel_threshold', getattr(constants, 'BLOCKED_VEL_THRESHOLD', 0.1))
@@ -386,6 +386,17 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('goal_reached_timeout', getattr(constants, 'DEFAULT_GOAL_REACHED_TIMEOUT', 1.0))
         self.declare_parameter('report_failure', getattr(constants, 'REPORT_FAILURE', True))
         self.declare_parameter('path_frame_id', '')
+
+        # Terminal heading alignment parameters
+        self.declare_parameter('enable_terminal_heading_align', getattr(constants, 'DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN', True))
+        self.declare_parameter('terminal_heading_tol', getattr(constants, 'DEFAULT_TERMINAL_HEADING_TOL', 0.26))
+        self.declare_parameter('terminal_heading_kp', getattr(constants, 'DEFAULT_TERMINAL_HEADING_KP', 1.2))
+        self.declare_parameter('terminal_heading_deadband', getattr(constants, 'DEFAULT_TERMINAL_HEADING_DEADBAND', 0.12))
+        self.declare_parameter('terminal_heading_min_vel', getattr(constants, 'DEFAULT_TERMINAL_HEADING_MIN_VEL', 0.15))
+        self.declare_parameter('terminal_heading_max_vel', getattr(constants, 'DEFAULT_TERMINAL_HEADING_MAX_VEL', 0.45))
+        self.declare_parameter('terminal_heading_timeout', getattr(constants, 'DEFAULT_TERMINAL_HEADING_TIMEOUT', 5.0))
+        self.declare_parameter('terminal_heading_drift_tol', getattr(constants, 'DEFAULT_TERMINAL_HEADING_DRIFT_TOL', 0.40))
+        self.declare_parameter('terminal_heading_stable_frames', getattr(constants, 'DEFAULT_TERMINAL_HEADING_STABLE_FRAMES', 2))
 
         self.path_topic = str(self.get_parameter('path_topic').value)
         self.stop_topic = str(self.get_parameter('stop_topic').value)
@@ -418,6 +429,22 @@ class NavigationPolicyNode(Node):
         self.camera_timeout = float(self.get_parameter('camera_timeout').value)
         self.goal_reached_timeout = float(self.get_parameter('goal_reached_timeout').value)
         self.configured_path_frame_id = str(self.get_parameter('path_frame_id').value).strip()
+
+        self.enable_terminal_heading_align = bool(self.get_parameter('enable_terminal_heading_align').value)
+        self.terminal_heading_tol = float(self.get_parameter('terminal_heading_tol').value)
+        self.terminal_heading_kp = float(self.get_parameter('terminal_heading_kp').value)
+        self.terminal_heading_deadband = float(self.get_parameter('terminal_heading_deadband').value)
+        self.terminal_heading_min_vel = float(self.get_parameter('terminal_heading_min_vel').value)
+        self.terminal_heading_max_vel = float(self.get_parameter('terminal_heading_max_vel').value)
+        self.terminal_heading_timeout = float(self.get_parameter('terminal_heading_timeout').value)
+        self.terminal_heading_drift_tol = float(self.get_parameter('terminal_heading_drift_tol').value)
+        self.terminal_heading_stable_frames = int(self.get_parameter('terminal_heading_stable_frames').value)
+
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
 
         # Publishers
         self.cmd_vel_publisher = self.create_publisher(
@@ -868,6 +895,117 @@ class NavigationPolicyNode(Node):
         self.cmd_vel_publisher.publish(twist)
         self.cmd_vel_direct_publisher.publish(twist)
 
+    def _finish_terminal_goal(self, reason="Terminal goal reached"):
+        """Finish the terminal goal, actively brake, clear tracking, and transition state."""
+        self._stop_robot()
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
+        self.path_tracker.clear()
+        self.target_pos_w = None
+        self.target_yaw_w = None
+        self.last_action = self._reset_last_action()
+        if hasattr(self, 'slope_gate'):
+            self.slope_gate.reset()
+        self.set_state(NavState.GOAL_REACHED, reason=reason)
+        self.get_logger().info(
+            '\033[92m' +
+            f'[Path] {reason}! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+            '\033[0m'
+        )
+        self.set_state(NavState.IDLE, reason="Goal reached reported, immediate transition to IDLE")
+
+    def _handle_terminal_heading_alignment(self, frame_id='map'):
+        """Execute smooth terminal heading alignment with deadband compensation and low-pass filtering."""
+        pos_in_frame, ori_in_frame = self.get_robot_pose_in_frame(frame_id) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
+        curr_robot_pos = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+        curr_robot_ori = ori_in_frame if ori_in_frame is not None else self.robot_orientation_w
+        if curr_robot_pos is None or curr_robot_ori is None:
+            self._stop_robot()
+            return
+
+        # 1. Timeout watchdog
+        if self.heading_align_start_time is not None and (self.robot_odom_time - self.heading_align_start_time > self.terminal_heading_timeout):
+            self.get_logger().warn(
+                f'[TerminalHeading] Alignment timeout ({self.terminal_heading_timeout:.1f}s exceeded). '
+                'Forcing stop and completing goal.'
+            )
+            self._finish_terminal_goal(reason="Terminal heading alignment timed out")
+            return
+
+        # 2. Position drift guard
+        if self.heading_align_terminal_pos is not None:
+            drift_dist = float(np.linalg.norm(
+                np.array(curr_robot_pos[:2]) - np.array(self.heading_align_terminal_pos[:2])
+            ))
+            if drift_dist > self.terminal_heading_drift_tol:
+                self.get_logger().warn(
+                    f'[TerminalHeading] Position drift detected ({drift_dist:.2f}m > {self.terminal_heading_drift_tol:.2f}m). '
+                    'Forcing stop and completing goal to prevent drift.'
+                )
+                self._finish_terminal_goal(reason=f"Terminal goal completed on drift threshold ({drift_dist:.2f}m)")
+                return
+
+        # 3. Calculate yaw error (wrap to [-pi, pi])
+        qw, qx, qy, qz = (
+            float(curr_robot_ori[0]), float(curr_robot_ori[1]),
+            float(curr_robot_ori[2]), float(curr_robot_ori[3])
+        )
+        robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        target_yaw = self.heading_align_target_yaw
+
+        yaw_err = math.atan2(math.sin(target_yaw - robot_yaw), math.cos(target_yaw - robot_yaw))
+
+        # 4. Check convergence
+        if abs(yaw_err) <= self.terminal_heading_tol:
+            self.heading_align_stable_count += 1
+            if self.heading_align_stable_count >= self.terminal_heading_stable_frames:
+                deg_err = math.degrees(abs(yaw_err))
+                self.get_logger().info(
+                    '\033[92m' +
+                    f'[TerminalHeading] Heading aligned! Error={deg_err:.1f}° <= {math.degrees(self.terminal_heading_tol):.1f}°. '
+                    '\033[0m'
+                )
+                self._finish_terminal_goal(
+                    reason=f"Terminal goal reached and heading aligned (err={deg_err:.1f}° <= {math.degrees(self.terminal_heading_tol):.1f}°)"
+                )
+                return
+        else:
+            self.heading_align_stable_count = 0
+
+        # 5. Smooth P control with deadband compensation and clamp
+        abs_err = abs(yaw_err)
+        sign = 1.0 if yaw_err >= 0.0 else -1.0
+        raw_wz = abs_err * self.terminal_heading_kp + self.terminal_heading_deadband
+        wz_mag = float(np.clip(raw_wz, self.terminal_heading_min_vel, self.terminal_heading_max_vel))
+        target_wz = sign * wz_mag
+
+        # Smooth low-pass filtering using constants.LOW_PASS_FILTER_COEF
+        filter_coef = np.array(constants.LOW_PASS_FILTER_COEF)
+        cmd_vec = np.array([0.0, 0.0, target_wz])
+        filt_model = filter_coef * cmd_vec + (1.0 - filter_coef) * self.prev_cmd
+        self.prev_cmd = filt_model
+
+        twist = Twist()
+        twist.linear.x = 0.0 + self.joy_linear_x
+        twist.linear.y = 0.0 + self.joy_linear_y
+        twist.angular.z = float(filt_model[2]) + self.joy_angular_z
+
+        self.cmd_vel_publisher.publish(twist)
+        self.cmd_vel_direct_publisher.publish(twist)
+
+        # Publish visualization markers
+        self.visualization_manager.publish_twist_marker(
+            twist, self.robot_odom_time, self.robot_frame_id, self.twist_marker_publisher
+        )
+
+        self.get_logger().info(
+            f'[TerminalHeading] Aligning: err={math.degrees(yaw_err):.1f}°, target_wz={target_wz:.2f}rad/s, filt_wz={twist.angular.z:.2f}rad/s',
+            throttle_duration_sec=0.5
+        )
+
     def mission_control_callback(self, msg: String):
         """Process incoming /mission/control commands ("pause", "resume", "stop", "continue").
 
@@ -1004,6 +1142,11 @@ class NavigationPolicyNode(Node):
 
         # 4) Load path into tracker and reset blocked detector
         self.goal_reached_latched = False
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
         self.path_tracker.set_path(pts, terminal_yaw=terminal_yaw, frame_id=frame_id if frame_id else 'map')
         self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
 
@@ -1106,6 +1249,7 @@ class NavigationPolicyNode(Node):
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):
             self._stop_robot()
+            self.is_aligning_heading = False
             # If in STOPPED state and path is present, keep blocked_detector window refreshed
             # so pausing does not accumulate stale stationary time into stall timeout
             if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
@@ -1115,6 +1259,7 @@ class NavigationPolicyNode(Node):
         # Check aborted goal
         if self.is_abort_goal:
             self._stop_robot()
+            self.is_aligning_heading = False
             if self.target_pos_w is not None:
                 self.waypoint_manager.re_add_aborted_waypoint(self.target_pos_w)
             self.target_pos_w = None
@@ -1124,6 +1269,12 @@ class NavigationPolicyNode(Node):
             self.last_action = self._reset_last_action()
             self.set_state(NavState.STOPPED, reason="Goal aborted")
             self.get_logger().info('Target aborted: State set to STOPPED.')
+            return
+
+        # Check active terminal heading alignment phase
+        if self.is_aligning_heading:
+            tracking_frame = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
+            self._handle_terminal_heading_alignment(frame_id=tracking_frame)
             return
 
         # 2) Segmented Path tracking logic (lookahead carrot point & blocked detection)
@@ -1145,19 +1296,60 @@ class NavigationPolicyNode(Node):
 
             # Check if reached terminal goal of current segment
             if self.path_tracker.check_arrived(robot_xy, arrive_threshold=self.segment_arrive_threshold):
-                self._stop_robot()
-                self.path_tracker.clear()
-                self.target_pos_w = None
-                self.target_yaw_w = None
-                self.last_action = self._reset_last_action()
-                self.set_state(NavState.GOAL_REACHED, reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m)")
-                self.get_logger().info(
-                    '\033[92m' +
-                    f'[Path] Arrived at segment terminal goal! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
-                    '\033[0m'
+                terminal_pt, terminal_yaw = self.path_tracker.get_terminal_pose()
+                need_heading_align = (
+                    self.enable_terminal_heading_align and
+                    terminal_yaw is not None
                 )
-                self.set_state(NavState.IDLE, reason="Goal reached reported, immediate transition to IDLE")
-                return
+
+                if need_heading_align:
+                    curr_ori = ori_for_tracking if ori_for_tracking is not None else self.robot_orientation_w
+                    robot_yaw = 0.0
+                    if curr_ori is not None:
+                        qw, qx, qy, qz = float(curr_ori[0]), float(curr_ori[1]), float(curr_ori[2]), float(curr_ori[3])
+                        robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+
+                    yaw_err = math.atan2(math.sin(terminal_yaw - robot_yaw), math.cos(terminal_yaw - robot_yaw))
+                    if abs(yaw_err) <= self.terminal_heading_tol:
+                        self.get_logger().info(
+                            '\033[92m' +
+                            f'[Path] Arrived at terminal goal and heading already within {math.degrees(self.terminal_heading_tol):.1f}° '
+                            f'(err={math.degrees(abs(yaw_err)):.1f}°). Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+                            '\033[0m'
+                        )
+                        self._finish_terminal_goal(
+                            reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m, heading within {math.degrees(self.terminal_heading_tol):.1f}°)"
+                        )
+                        return
+                    else:
+                        self._stop_robot()
+                        self.is_aligning_heading = True
+                        self.heading_align_target_yaw = terminal_yaw
+                        self.heading_align_terminal_pos = list(terminal_pt[:2]) if terminal_pt else list(robot_xy)
+                        self.heading_align_start_time = self.robot_odom_time
+                        self.heading_align_stable_count = 0
+                        self.path_tracker.clear()
+                        self.target_pos_w = None
+                        self.target_yaw_w = None
+                        self.last_action = self._reset_last_action()
+                        if hasattr(self, 'slope_gate'):
+                            self.slope_gate.reset()
+                        self.get_logger().info(
+                            '\033[93m' +
+                            f'[Path] Arrived at terminal position (< {self.segment_arrive_threshold}m). '
+                            f'Current heading err={math.degrees(yaw_err):.1f}° > {math.degrees(self.terminal_heading_tol):.1f}°. '
+                            f'Entering terminal heading alignment phase (state stays RUNNING).' +
+                            '\033[0m'
+                        )
+                        return
+                else:
+                    self.get_logger().info(
+                        '\033[92m' +
+                        f'[Path] Arrived at segment terminal goal! Actively braked (/cmd_vel=0), state -> GOAL_REACHED.' +
+                        '\033[0m'
+                    )
+                    self._finish_terminal_goal(reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m)")
+                    return
 
             # Check if blocked / stalled against obstacles -> Transition to FAILED
             robot_vel_xy = self.linear_vel[:2] if self.linear_vel else [0.0, 0.0]

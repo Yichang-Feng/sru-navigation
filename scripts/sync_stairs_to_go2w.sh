@@ -39,6 +39,11 @@ scp "$WORKSPACE_DIR/stairs_depth_processor.py" \
 scp "$WORKSPACE_DIR/rl_nav_controller_stairs.py" \
     "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py"
 
+if [ -f "$WORKSPACE_DIR/scripts/constants.py" ]; then
+    scp "$WORKSPACE_DIR/scripts/constants.py" \
+        "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py"
+fi
+
 # 3. 推送启动脚本与诊断工具
 echo -e "\n[2/4] 推送 start_nav.sh, start_nav_stairs.sh 与 door_diagnostic_logger.py..."
 if [ -f "$WORKSPACE_DIR/scripts/start_nav.sh" ]; then
