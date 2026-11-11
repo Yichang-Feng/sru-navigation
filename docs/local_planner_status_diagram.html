@@ -82,9 +82,10 @@
       <path class="edge" marker-end="url(#arw)" d="M270,165 Q395,250 520,368"></path>
       <text class="lbl" x="392" y="248" text-anchor="middle">收到新路径 (/global_path)</text>
 
-      <!-- running -> goal_reached (arrival) -->
+      <!-- running -> goal_reached (arrival & terminal alignment) -->
       <path class="edge" marker-end="url(#arw)" d="M720,368 Q880,280 1050,172"></path>
-      <text class="lbl" x="900" y="252" text-anchor="middle">到达终点 (&lt; 0.15m)</text>
+      <text class="lbl" x="900" y="244" text-anchor="middle">到达终点 (&lt; 0.20m)</text>
+      <text class="lbl" x="900" y="264" text-anchor="middle" font-size="11.5" fill="#93c5fd">且朝向对齐 / 漂移看门狗</text>
 
       <!-- goal_reached -> idle (immediate return, forming unidirectional triangle) -->
       <path class="edge" marker-end="url(#arw)" d="M940,160 L300,160"></path>
@@ -176,8 +177,19 @@
           <td>加载路径至折线跟踪器，前瞻胡萝卜点引导，ZED 深度自主避障</td></tr>
 
         <tr><td><code>running</code></td><td><code>goal_reached</code></td>
-          <td>机器人中心距离当前段终端点 &lt; <code>segment_arrive_threshold</code> (0.15m)</td>
-          <td>主动刹停速度置零，清除已达路段，瞬发 1 次到达上报</td></tr>
+          <td>
+            <b>1. 到点判定</b>：机器人中心距离当前段终端点 &lt; <code>segment_arrive_threshold</code> (0.20m)。<br/>
+            <b>2. 朝向与完成条件（二选一）</b>：
+            <ul style="margin:2px 0 0;padding-left:16px">
+              <li><b>无朝向 / 楼梯上</b>：直接刹停并触发。</li>
+              <li><b>有终点朝向</b>：进入原地踏步调姿（状态保持 <code>running</code>），满足以下任一条件时正式触发：
+                <br/>· 偏航角误差 $\le 15^\circ$（<code>terminal_heading_tol = 0.26rad</code>，稳定 2 帧）；
+                <br/>· 原地踏步位移漂移 &gt; <code>0.40m</code>（防漂移保护强退）；
+                <br/>· 调姿耗时 &gt; <code>5.0s</code>（超时看门狗保护强退）。
+              </li>
+            </ul>
+          </td>
+          <td>主动刹停速度置零（<code>/cmd_vel = 0</code>），清除已达路段，瞬发 1 次到达上报</td></tr>
 
         <tr><td><code>goal_reached</code></td><td><code>idle</code></td>
           <td>完成到达上报</td>
@@ -240,6 +252,13 @@
       </li>
       <li><b>心跳与瞬发</b>：未变化时以 1Hz 周期广播；状态发生跳变时当个控制循环瞬时毫秒级发布。</li>
       <li><b>底盘总闸自动解锁</b>：<code>rl_nav_controller</code> 启动且定位就绪后，自动发布 <code>/startNavi: true</code> 与 <code>/motion_enabled: true</code> 解锁底盘电机。</li>
+      <li><b>终点姿态/航向对齐与漂移看门狗机制</b>：
+        <ul>
+          <li><b>时序解耦与状态保持</b>：行进全过程由 RL 策略与自适应前瞻自主避障导航；到达终点坐标（&lt; 0.20m）后，才切入传统带死区补偿与限幅的 P 控制器进行原地踏步调姿，此时外部状态严格保持 <code>running</code>，保证上层业务流程不会过早提前执行后续动作。</li>
+          <li><b>三重退出安全防护</b>：角度误差收敛至 $\le 15^\circ$（<code>terminal_heading_tol = 0.26rad</code>，稳定 2 帧）判定达成；原地踏步位移漂移超过 40cm（<code>0.40m</code>）立即刹车强行完成；超时 5.0s 看门狗退出防无限打转。</li>
+          <li><b>楼梯禁转保护</b>：若到点时机器狗仍处于楼梯上（<code>is_stair_down</code> 或 <code>is_stair_up</code> 为 True），严格禁止原地大幅自转，直接刹停完成，防止阶梯踩空摔落。</li>
+        </ul>
+      </li>
     </ul>
   </div>
 </div>
