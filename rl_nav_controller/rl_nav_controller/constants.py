@@ -5,6 +5,7 @@ DEFAULT_CONTROL_FREQUENCY = 5.0  # Hz
 DEFAULT_MIN_DEPTH = 0.25  # meters
 DEFAULT_MAX_DEPTH = 10.0  # meters
 ARRIVE_GOAL_THRESHOLD = 0.75  # meters
+ARRIVE_HEADING_THRESHOLD = 0.2618  # radians (~15 deg, matches training termination)
 NEAR_GOAL_THRESHOLD_MULTIPLIER = 2.0
 JOYSTICK_TIMEOUT = 15.0  # seconds
 
