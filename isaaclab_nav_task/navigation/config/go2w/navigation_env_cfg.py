@@ -183,6 +183,9 @@ class Go2WNavigationEnvCfg(NavigationEnvCfg):
         self.observations.low_level_policy.base_lin_vel = None
         self.observations.low_level_policy.enable_corruption = False
 
+        # 禁用大范围关节缩放随机化，防止 DreamWaQ 启动时趴地/反折关节
+        self.events.reset_robot_joints = None
+
         # 动作滤波范围对齐 SRU-Odin 原版 (0.4, 0.9)
         self.events.randomize_low_pass_filter_alpha.params = {
             "alpha_range": (0.4, 0.9),
@@ -484,12 +487,19 @@ class Go2WNavigationEnvCfg_Heading(Go2WNavigationEnvCfg):
         super().__post_init__()
         self.rewards = Go2WHeadingRewardsCfg()
         self.observations = ObservationsHeadingCfg()
+        # CRITICAL: DreamWaQ requires 57-dim low-level observations (no base_lin_vel)
+        self.observations.low_level_policy.base_lin_vel = None
+        self.observations.low_level_policy.enable_corruption = False
+        self.events.reset_robot_joints = None
         # Use heading-aware arrival termination (distance < 0.4m, heading error < 10 deg, settled)
         self.terminations.early_termination.func = mdp.at_goal_with_heading_navigation
         self.terminations.early_termination.params = {
             "distance_threshold": 0.4,
             "heading_threshold": 0.1745,  # ~10 degrees
             "goal_cmd_name": "robot_goal",
+            "velocity_threshold": 0.50,
+            "fixed_dwell_time": 5.0,
+            "required_align_steps": 2,
         }
         # Use heading-aware timeout termination (record success only if heading aligned)
         self.terminations.time_out.func = mdp.time_out_with_heading_navigation

@@ -43,6 +43,8 @@ parser.add_argument("--use_last_checkpoint", action="store_true", help="Use last
 parser.add_argument("--export_jit", action="store_true", default=False, help="Export policy as JIT module.")
 parser.add_argument("--export_onnx", action="store_true", default=False, help="Export policy as ONNX model.")
 parser.add_argument("--num_episodes", type=int, default=None, help="Number of episodes to evaluate before exiting.")
+parser.add_argument("--phase", type=float, default=None, help="Force specific heading curriculum phase (e.g., 2.0 or 3.0).")
+parser.add_argument("--heading_threshold", type=float, default=20.0, help="Heading alignment error threshold in degrees to count as success (default: 20.0 deg).")
 parser.add_argument("--camera_mode", type=str, default="overview", choices=["overview", "none"], help="Camera mode: 'overview' (sets initial overview viewpoint with full manual mouse control) or 'none'.")
 parser.add_argument("--camera_distance", type=float, default=5.0, help="Camera distance from robot for overview view.")
 parser.add_argument("--camera_height", type=float, default=3.8, help="Camera height above robot for overview view.")
@@ -253,6 +255,12 @@ def main():
     if hasattr(env_cfg.commands, "robot_goal"):
         env_cfg.commands.robot_goal.debug_vis = False
 
+    # Clean evaluation initialization: disable training perturbations and random forces
+    if hasattr(env_cfg, "events"):
+        env_cfg.events.push_robot = None
+        env_cfg.events.base_external_force_torque = None
+        env_cfg.events.reset_robot_joints = None
+
     # Create the environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
     if args_cli.video:
@@ -267,6 +275,17 @@ def main():
 
     # Wrap the environment
     env = RslRlVecEnvWrapper(env)
+
+    # Set heading curriculum phase / learning iteration for accurate evaluation
+    if args_cli.phase is not None:
+        os.environ["B2W_HEADING_PHASE"] = str(args_cli.phase)
+        print(f"[INFO] Forcing heading curriculum phase: {args_cli.phase}")
+    elif resume_path:
+        match = re.search(r"model_(\d+)\.pt", str(resume_path))
+        if match:
+            chk_iter = int(match.group(1))
+            env.unwrapped.current_learning_iteration = chk_iter
+            print(f"[INFO] Inferred iteration {chk_iter} from checkpoint for curriculum management.")
 
     # Check if checkpoint is an ONNX policy, TorchScript JIT policy, or standard checkpoint dict
     is_onnx = str(resume_path).endswith(".onnx")
@@ -402,11 +421,16 @@ def main():
 
     total_episodes = 0
     success_episodes = 0
+    arrived_episodes = 0
+    unaligned_episodes = 0
     collision_episodes = 0
     timeout_episodes = 0
     fall_episodes = 0
     success_times = []
     success_distances = []
+    all_final_yaw_errors = []
+
+    is_heading_task = "Heading" in str(args_cli.task) or (goal_cmd is not None and hasattr(goal_cmd, "goal_heading_world"))
 
     # Setup offline procedural visual markers for Goal (终点) and Start (起点)
     from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
@@ -617,7 +641,17 @@ def main():
         if resume_path:
             print(f" Checkpoint               : {resume_path}")
         print("-" * 68)
-        print(f" Success Rate (SR)        : {sr:6.2f}% ({success_episodes}/{total_episodes})")
+        if is_heading_task:
+            aligned_sr = (success_episodes / total_episodes) * 100.0
+            arr_r = (arrived_episodes / total_episodes) * 100.0
+            unaligned_r = (unaligned_episodes / total_episodes) * 100.0
+            avg_yaw = (sum(all_final_yaw_errors) / len(all_final_yaw_errors)) if all_final_yaw_errors else 0.0
+            print(f" Strict Heading SR        : {aligned_sr:6.2f}% ({success_episodes}/{total_episodes}) [Yaw <= {args_cli.heading_threshold:.1f}°]")
+            print(f" Arrival Rate (Position)  : {arr_r:6.2f}% ({arrived_episodes}/{total_episodes}) [d < 0.4m]")
+            print(f" Heading Misaligned Rate  : {unaligned_r:6.2f}% ({unaligned_episodes}/{total_episodes}) [Arrived but Yaw > {args_cli.heading_threshold:.1f}°]")
+            print(f" Avg Terminal Yaw Error   : {avg_yaw:6.1f}°")
+        else:
+            print(f" Success Rate (SR)        : {sr:6.2f}% ({success_episodes}/{total_episodes})")
         print(f" Collision Rate (CR)      : {cr:6.2f}% ({collision_episodes}/{total_episodes})")
         print(f" Timeout Rate (TR)        : {tr:6.2f}% ({timeout_episodes}/{total_episodes})")
         print(f" Fall / Flip Rate         : {fr:6.2f}% ({fall_episodes}/{total_episodes})")
@@ -663,36 +697,89 @@ def main():
                     duration_s = ep_steps[env_id].item() * step_dt
                     init_dist = initial_distances[env_id].item()
 
-                    is_success = bool(term_dones[env_id, term_map["early_termination"]].item()) if (term_dones is not None and "early_termination" in term_map) else False
+                    curr_yaw_deg = None
+                    if goal_cmd is not None:
+                        if hasattr(goal_cmd, "last_target_yaw_error"):
+                            curr_yaw_deg = abs(goal_cmd.last_target_yaw_error[env_id].item()) * 180.0 / 3.1415926535
+                        elif hasattr(goal_cmd, "target_yaw_error"):
+                            curr_yaw_deg = abs(goal_cmd.target_yaw_error[env_id].item()) * 180.0 / 3.1415926535
+
+                    yaw_info = f" | YawErr: {curr_yaw_deg:4.1f}°" if curr_yaw_deg is not None else ""
+                    if curr_yaw_deg is not None:
+                        all_final_yaw_errors.append(curr_yaw_deg)
+
+                    is_early = bool(term_dones[env_id, term_map["early_termination"]].item()) if (term_dones is not None and "early_termination" in term_map) else False
                     is_collision = bool(term_dones[env_id, term_map["base_contact"]].item()) if (term_dones is not None and "base_contact" in term_map) else False
                     is_timeout = bool(term_dones[env_id, term_map["time_out"]].item()) if (term_dones is not None and "time_out" in term_map) else False
                     is_large_angle = bool(term_dones[env_id, term_map["large_pitch_angle"]].item()) if (term_dones is not None and "large_pitch_angle" in term_map) else False
                     is_fall = bool(term_dones[env_id, term_map["terrain_fall"]].item()) if (term_dones is not None and "terrain_fall" in term_map) else False
 
-                    if is_success:
-                        status = "\033[92mSUCCESS (Reached Goal)\033[0m"
-                        success_episodes += 1
-                        success_times.append(duration_s)
-                        success_distances.append(init_dist)
-                    elif is_collision:
-                        status = "\033[91mCOLLISION (base_contact)\033[0m"
-                        collision_episodes += 1
-                    elif is_large_angle:
-                        status = "\033[93mFAIL (tilted/flipped)\033[0m"
-                        fall_episodes += 1
-                    elif is_fall:
-                        status = "\033[93mFAIL (terrain fall)\033[0m"
-                        fall_episodes += 1
-                    elif is_timeout:
-                        status = "\033[94mTIMEOUT (exceeded 60s)\033[0m"
-                        timeout_episodes += 1
+                    outcome = 0.0
+                    if goal_cmd is not None:
+                        if hasattr(goal_cmd, "last_heading_terminal_outcome"):
+                            outcome = goal_cmd.last_heading_terminal_outcome[env_id].item()
+                        elif hasattr(goal_cmd, "heading_terminal_outcome"):
+                            outcome = goal_cmd.heading_terminal_outcome[env_id].item()
+
+                    if is_heading_task:
+                        # Strict Heading Evaluation:
+                        # Success requires: Arrived in goal circle AND final yaw error within threshold (e.g. <= 20.0 deg)
+                        is_aligned = (curr_yaw_deg is not None and curr_yaw_deg <= args_cli.heading_threshold) or (outcome > 0.5)
+                        is_dwell_fail = outcome < -0.5
+
+                        if is_early:
+                            arrived_episodes += 1
+                            if is_aligned:
+                                status = "\033[92mSUCCESS (Aligned)\033[0m"
+                                success_episodes += 1
+                                success_times.append(duration_s)
+                                success_distances.append(init_dist)
+                            else:
+                                status = f"\033[93mFAIL (Unaligned Yaw > {args_cli.heading_threshold:.0f}°)\033[0m"
+                                unaligned_episodes += 1
+                        elif is_dwell_fail:
+                            arrived_episodes += 1
+                            status = "\033[93mFAIL (Dwell Timeout)\033[0m"
+                            timeout_episodes += 1
+                        elif is_collision:
+                            status = "\033[91mCOLLISION (base_contact)\033[0m"
+                            collision_episodes += 1
+                        elif is_large_angle:
+                            status = "\033[93mFAIL (tilted/flipped)\033[0m"
+                            fall_episodes += 1
+                        elif is_fall:
+                            status = "\033[93mFAIL (terrain fall)\033[0m"
+                            fall_episodes += 1
+                        elif is_timeout:
+                            status = "\033[94mTIMEOUT (exceeded limit)\033[0m"
+                            timeout_episodes += 1
+                        else:
+                            status = "FAIL (other)"
                     else:
-                        status = "FAIL (other)"
+                        if is_early:
+                            status = "\033[92mSUCCESS (Reached Goal)\033[0m"
+                            success_episodes += 1
+                            success_times.append(duration_s)
+                            success_distances.append(init_dist)
+                        elif is_collision:
+                            status = "\033[91mCOLLISION (base_contact)\033[0m"
+                            collision_episodes += 1
+                        elif is_large_angle:
+                            status = "\033[93mFAIL (tilted/flipped)\033[0m"
+                            fall_episodes += 1
+                        elif is_fall:
+                            status = "\033[93mFAIL (terrain fall)\033[0m"
+                            fall_episodes += 1
+                        elif is_timeout:
+                            status = "\033[94mTIMEOUT (exceeded limit)\033[0m"
+                            timeout_episodes += 1
+                        else:
+                            status = "FAIL (other)"
 
                     sr = (success_episodes / total_episodes) * 100.0
                     print(
                         f"[Episode {total_episodes:4d} | Env {env_id:2d}] {status:<34} | "
-                        f"Time: {duration_s:5.1f}s | Goal Dist: {init_dist:4.1f}m | "
+                        f"Time: {duration_s:5.1f}s | Goal Dist: {init_dist:4.1f}m{yaw_info} | "
                         f"Current SR: {sr:5.1f}% ({success_episodes}/{total_episodes})"
                     )
 

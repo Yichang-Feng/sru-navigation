@@ -135,15 +135,18 @@ class B2WNavMDPOHeadingRunnerCfg(B2WNavMDPORunnerCfg):
     """MDPO runner configuration for B2W navigation heading fine-tuning."""
 
     num_steps_per_env = 24
-    max_iterations = 2500
+    max_iterations = 6000
     save_interval = 100
+    freeze_iters = 600
     experiment_name = "b2w_navigation_heading_mdpo"
 
     def __post_init__(self):
         super().__post_init__()
         self.policy.init_noise_std = 0.35
         self.policy.dropout = 0.0
-        self.algorithm.learning_rate = 1.5e-4
+        # Fine-tuning LR: one order of magnitude smaller than scratch (3e-4 -> 3e-5)
+        self.algorithm.learning_rate = 3e-5
+        self.algorithm.min_learning_rate = 1e-6
         self.algorithm.clip_param = 0.10
         self.algorithm.desired_kl = 0.005
         self.algorithm.entropy_coef = 0.002
@@ -155,15 +158,18 @@ class B2WNavPPOHeadingRunnerCfg(B2WNavPPORunnerCfg):
     """PPO runner configuration for B2W navigation heading fine-tuning."""
 
     num_steps_per_env = 24
-    max_iterations = 2500
+    max_iterations = 6000
     save_interval = 100
+    freeze_iters = 600
     experiment_name = "b2w_navigation_heading_ppo"
 
     def __post_init__(self):
         super().__post_init__()
         self.policy.init_noise_std = 0.35
         self.policy.dropout = 0.0
-        self.algorithm.learning_rate = 1.5e-4
+        # Fine-tuning LR: one order of magnitude smaller than scratch (3e-4 -> 3e-5)
+        self.algorithm.learning_rate = 3e-5
+        self.algorithm.min_learning_rate = 1e-6
         self.algorithm.clip_param = 0.10
         self.algorithm.desired_kl = 0.005
         self.algorithm.entropy_coef = 0.002

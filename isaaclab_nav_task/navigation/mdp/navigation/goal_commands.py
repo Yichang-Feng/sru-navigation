@@ -392,6 +392,14 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.success_tracker = SuccessRateTracker(self.num_envs, self.device, buffer_size=10)
         self.success_rate_buffer = torch.full((self.num_envs, 10), -1.0, device=self.device)
 
+        # Arrival heading adjustment tracking buffers
+        self.is_adjusting_heading = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.adjust_dwell_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.align_consecutive_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.heading_terminal_outcome = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.last_heading_terminal_outcome = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.last_target_yaw_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
     def _init_metrics(self):
         """Initialize performance metrics."""
         self.metrics["velocity_toward_goal"] = torch.zeros(self.num_envs, device=self.device)
@@ -519,8 +527,12 @@ class RobotNavigationGoalCommand(CommandTerm):
         # Get terrain indices
         terrain_indices = self._get_terrain_indices(env_ids_tensor)
 
-        # Sample goal positions (from valid_mask with smaller padding)
-        goal_x, goal_y, goal_z = self._position_sampler.sample(terrain_indices)
+        # Sample goal positions: for heading tasks, sample from spawn_mask to guarantee >=0.8m obstacle clearance
+        # so the robot always has ample physical room to rotate 360 degrees in place without hitting obstacles.
+        if hasattr(self, "goal_heading_world") and getattr(self.cfg, "clearance_for_heading_goal", True):
+            goal_x, goal_y, goal_z = self._position_sampler.sample_spawn(terrain_indices)
+        else:
+            goal_x, goal_y, goal_z = self._position_sampler.sample(terrain_indices)
         # Sample spawn positions (from spawn_mask with larger padding for robot body)
         spawn_x, spawn_y, spawn_z = self._position_sampler.sample_spawn(terrain_indices)
 
@@ -566,6 +578,19 @@ class RobotNavigationGoalCommand(CommandTerm):
             self.heading_time_at_goal[env_ids] = 0.0
         if hasattr(self, "heading_time_at_goal_in_steps"):
             self.heading_time_at_goal_in_steps[env_ids] = 0
+        if hasattr(self, "time_in_goal_circle_in_steps"):
+            self.time_in_goal_circle_in_steps[env_ids] = 0
+        if hasattr(self, "is_adjusting_heading"):
+            self.is_adjusting_heading[env_ids] = False
+        if hasattr(self, "adjust_dwell_steps"):
+            self.adjust_dwell_steps[env_ids] = 0
+        if hasattr(self, "align_consecutive_steps"):
+            self.align_consecutive_steps[env_ids] = 0
+        if hasattr(self, "heading_terminal_outcome"):
+            self.last_heading_terminal_outcome[env_ids] = self.heading_terminal_outcome[env_ids].clone()
+            self.heading_terminal_outcome[env_ids] = 0.0
+        if hasattr(self, "target_yaw_error"):
+            self.last_target_yaw_error[env_ids] = self.target_yaw_error[env_ids].clone()
         self.total_distance_traveled[env_ids] = 0.0
         self.previous_position[env_ids] = self.robot.data.root_pos_w[env_ids].clone()
 
@@ -589,7 +614,14 @@ class RobotNavigationGoalCommand(CommandTerm):
         direction = goal_in_body / torch.clamp(distance, min=1e-6)
         log_distance = torch.log(distance + 1.0)
 
-        self.goal_command_body[:, :3] = direction
+        if hasattr(self, "goal_heading_world"):
+            # Smoothly fade out position direction within arrival circle (0.4m)
+            # This completely eliminates position singularity jitter (180 deg flips from 2cm body wobble)
+            # and seamlessly transfers yaw control authority to target_heading [cos, sin]!
+            direction_gate = torch.clamp(distance / 0.4, min=0.0, max=1.0)
+            self.goal_command_body[:, :3] = direction * direction_gate
+        else:
+            self.goal_command_body[:, :3] = direction
         self.goal_command_body[:, 3:] = log_distance
 
         # Relative heading in robot body frame

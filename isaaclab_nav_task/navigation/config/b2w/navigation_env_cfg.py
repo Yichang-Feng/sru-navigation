@@ -10,8 +10,9 @@ import os
 from isaaclab.utils import configclass
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 
-from isaaclab_nav_task.navigation.navigation_env_cfg import NavigationEnvCfg, RewardsCfg
+from isaaclab_nav_task.navigation.navigation_env_cfg import NavigationEnvCfg, RewardsCfg, CurriculumCfg
 import isaaclab_nav_task.navigation.mdp as mdp
 from isaaclab_nav_task.navigation.config.go2w.navigation_env_cfg import ObservationsHeadingCfg
 
@@ -99,13 +100,46 @@ class B2WNavigationEnvCfg_PLAY(B2WNavigationEnvCfg):
 
 @configclass
 class B2WHeadingRewardsCfg(RewardsCfg):
-    """Reward terms for B2W arrival heading control."""
+    """Reward terms for B2W arrival heading control (Official B2W baseline + 3-Phase curriculum)."""
 
-    # 1. 到达目标点机身朝向对齐门控奖励 (d <= 1.0m 时平滑开启，d->0 时权重为 1.0)
+    # 1. 到达目标点机身朝向对齐过程引导 (Phase 1 为 0.0，Phase 2 & 3 开启为 2.0)
     target_heading = RewTerm(
         func=mdp.target_heading_alignment,
-        weight=1.0,
+        weight=0.0,
         params={"command_name": "robot_goal", "distance_threshold": 1.0},
+    )
+
+    # 2. 到达目标点朝向终末结算大奖与超时惩罚 (Phase 1 & 1.5 为 0.0，Phase 2 温和开启 0.33，Phase 3 开启 1.0)
+    # success_bonus 经过 dt 补偿后到手净值为 +30.0，fail_penalty 净值为 -15.0
+    target_heading_terminal = RewTerm(
+        func=mdp.target_heading_terminal_outcome,
+        weight=0.0,
+        params={"command_name": "robot_goal", "success_bonus": 30.0, "fail_penalty": 15.0},
+    )
+
+    # 3. 终点圈内超额线速度惩罚 (Phase 1.5, 2, 3 激活，对原地自旋角速度 0 惩罚，促进入圈主动刹车)
+    velocity_linear_penalty = RewTerm(
+        func=mdp.velocity_at_goal_linear_penalty,
+        weight=0.0,
+        params={"command_name": "robot_goal", "distance_threshold": 0.4, "speed_deadzone": 0.2},
+    )
+
+    # 4. 到达目标点机身朝向角速度势能引导 (Phase 2 & 3 开启为 1.5，主动旋转调头直接奖励，逆向旋转直接扣分)
+    target_yaw_progress = RewTerm(
+        func=mdp.target_yaw_progress,
+        weight=0.0,
+        params={"command_name": "robot_goal", "distance_threshold": 1.0},
+    )
+
+
+@configclass
+class B2WHeadingCurriculumCfg(CurriculumCfg):
+    """Curriculum terms for B2W arrival heading fine-tuning."""
+
+    disable_backward_penalty = None
+    heading_phase = CurrTerm(
+        func=mdp.b2w_heading_curriculum_phase,
+        params={"phase_iters": (600, 700, 4500), "phase_ratios": (0.10, 0.1167, 0.75), "total_steps": 144000},
     )
 
 
@@ -115,28 +149,41 @@ class B2WNavigationEnvCfg_Heading(B2WNavigationEnvCfg):
 
     rewards: B2WHeadingRewardsCfg = B2WHeadingRewardsCfg()
     observations: ObservationsHeadingCfg = ObservationsHeadingCfg()
+    curriculum: B2WHeadingCurriculumCfg = B2WHeadingCurriculumCfg()
 
     def __post_init__(self):
         super().__post_init__()
         self.rewards = B2WHeadingRewardsCfg()
         self.observations = ObservationsHeadingCfg()
+        self.curriculum = B2WHeadingCurriculumCfg()
         self.rewards.joint_acc_l2_joint.params = {
             "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES + WHEEL_JOINT_NAMES)
         }
-        # Heading-aware arrival termination: requires both distance < 0.4m and heading error < 10 deg (0.1745 rad)
+        # 终点位置饱和平台保护 (0.4m)：四轮足原地踏步自旋时机身 0.15m 抖动不扣位置分
+        self.rewards.reach_goal_xy_tight.params["plateau_radius"] = 0.4
+
+        # Heading-aware arrival termination:
+        # Phase 1: 0.4m distance, heading unconstrained (3.14 rad), fixed 5.0s window for arrival review
+        # Phase 2: 0.4m distance, 0.35 rad (~20 deg), fixed 5.0s window for in-place turning exploration
+        # Phase 3: 0.3m distance, 0.15 rad (~8.6 deg) tightened, 4.0s window
         self.terminations.early_termination.func = mdp.at_goal_with_heading_navigation
         self.terminations.early_termination.params = {
             "distance_threshold": 0.4,
-            "heading_threshold": 0.1745,  # ~10 degrees
+            "heading_threshold": 3.14159,  # Initial Phase 1: unconstrained heading for arrival review
             "goal_cmd_name": "robot_goal",
+            "velocity_threshold": 0.55,  # Relaxed for quadruped suspension balancing jitter
+            "fixed_dwell_time": 5.0,  # Fixed generous 5.0s (50 steps) window, no aggressive shrinking
+            "required_align_steps": 2,  # 2 consecutive steps (0.4s) to prevent single-step jitter reset
         }
         # Heading-aware timeout termination: only counts success if heading was aligned
         self.terminations.time_out.func = mdp.time_out_with_heading_navigation
         self.terminations.time_out.params = {
             "distance_threshold": 0.4,
-            "heading_threshold": 0.1745,  # ~10 degrees
+            "heading_threshold": 0.35,  # ~20 degrees
             "goal_cmd_name": "robot_goal",
         }
+        if hasattr(self.observations.metrics, "in_goal"):
+            self.observations.metrics.in_goal.params["heading_threshold"] = 0.35
         # Allow terrain level override for fine-tuning
         init_level = os.environ.get("B2W_INIT_LEVEL", "").strip()
         if init_level:

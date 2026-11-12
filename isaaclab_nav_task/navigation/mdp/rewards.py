@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import math
 import torch
 
 from isaaclab.assets import Articulation
@@ -68,8 +69,9 @@ def reach_goal_xyz(
     probability: float,
     flat: bool,
     ratio: bool,
+    plateau_radius: float = 0.0,
 ) -> torch.Tensor:
-    """Reward goal reaching with configurable sigmoid shaping.
+    """Reward goal reaching with configurable sigmoid shaping and optional flat plateau.
 
     Args:
         env: The learning environment.
@@ -79,6 +81,8 @@ def reach_goal_xyz(
         probability: Probability of random sampling.
         flat: Whether to only consider xy error (ignore z).
         ratio: Whether to scale by travel distance ratio.
+        plateau_radius: Distance within which reward is locked at maximum saturation (1.0 / T_r).
+            Protects robots from losing position reward during in-place turning steps at the goal.
 
     Returns:
         Dense reward based on distance to goal.
@@ -93,7 +97,12 @@ def reach_goal_xyz(
     else:
         xyz_error = torch.norm(goal_cmd_generator._get_unscaled_command(), dim=1)
 
-    reward = 1 / (1 + torch.square(xyz_error / sigmoid)) / T_r
+    if plateau_radius > 0.0:
+        dist_for_reward = torch.clamp(xyz_error - plateau_radius, min=0.0)
+    else:
+        dist_for_reward = xyz_error
+
+    reward = 1 / (1 + torch.square(dist_for_reward / sigmoid)) / T_r
 
     timeup_mask = t > (T - goal_cmd_generator.required_time_at_goal_in_steps)
     random_mask = torch.rand_like(t.float()) < probability
@@ -319,20 +328,102 @@ def lateral_movement_l2(
     return torch.square(excess_lat_vel)
 
 
+def _compute_realtime_yaw_error(
+    env: ManagerBasedRLEnv, goal_cmd: RobotNavigationGoalCommand
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute real-time yaw error and cosine directly from robot quaternion without command lag."""
+    if hasattr(goal_cmd, "goal_heading_world"):
+        q = env.scene["robot"].data.root_quat_w
+        robot_yaw = torch.atan2(2.0 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1.0 - 2.0 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        yaw_err = (goal_cmd.goal_heading_world - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
+        return yaw_err, torch.cos(yaw_err)
+    yaw_err = getattr(goal_cmd, "target_yaw_error", torch.zeros(env.num_envs, device=env.device))
+    return yaw_err, getattr(goal_cmd, "target_yaw_cos", torch.ones_like(yaw_err))
+
+
 def target_heading_alignment(
     env: ManagerBasedRLEnv,
     command_name: str = "robot_goal",
     distance_threshold: float = 1.0,
 ) -> torch.Tensor:
-    """Reward for aligning with the final target heading when approaching the goal.
+    """Reward for aligning with the final target heading when approaching the goal or in adjustment phase.
 
     Uses smooth distance gating: 0 when dist > distance_threshold, increasing to 1.0 as dist -> 0.
+    Once the robot enters the goal circle and starts adjusting orientation, gate is locked at 1.0.
+    Uses non-negative half-wave cosine mapping [0, 1]:
+    - Exactly aligned (0 deg): 1.0
+    - Perpendicular (90 deg): 0.5
+    - Opposite (180 deg): 0.0
     """
     goal_cmd: RobotNavigationGoalCommand = env.command_manager.get_term(command_name)
     dist = torch.norm(goal_cmd._get_unscaled_command()[:, :2], dim=1)
     gate = torch.clamp(1.0 - dist / distance_threshold, min=0.0, max=1.0)
-    cos_yaw = getattr(goal_cmd, "target_yaw_cos", torch.ones_like(dist))
-    return gate * cos_yaw
+    is_adjusting = getattr(goal_cmd, "is_adjusting_heading", None)
+    if is_adjusting is not None:
+        gate = torch.where(is_adjusting, torch.ones_like(gate), gate)
+
+    _, cos_yaw = _compute_realtime_yaw_error(env, goal_cmd)
+    heading_reward = 0.5 * (1.0 + cos_yaw)
+    return gate * heading_reward
+
+
+def target_heading_terminal_outcome(
+    env: ManagerBasedRLEnv,
+    command_name: str = "robot_goal",
+    success_bonus: float = 30.0,
+    fail_penalty: float = 15.0,
+) -> torch.Tensor:
+    """Award terminal bonus for successful heading alignment and penalty for dwell timeout.
+
+    Note: IsaacLab's RewardManager implicitly scales all term returns by env.step_dt (0.1s).
+    To ensure that the agent receives genuine net return of +success_bonus and -fail_penalty,
+    we divide by env.step_dt so that value = (bonus / dt) * dt = bonus.
+    """
+    goal_cmd: RobotNavigationGoalCommand = env.command_manager.get_term(command_name)
+    outcome = getattr(goal_cmd, "heading_terminal_outcome", None)
+    if outcome is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    reward = torch.zeros_like(outcome)
+    dt = getattr(env, "step_dt", 0.1)
+    eff_success = success_bonus / max(1e-4, dt)
+    eff_fail = fail_penalty / max(1e-4, dt)
+    reward[outcome > 0.5] = eff_success
+    reward[outcome < -0.5] = -eff_fail
+    return reward
+
+
+def target_yaw_progress(
+    env: ManagerBasedRLEnv,
+    command_name: str = "robot_goal",
+    distance_threshold: float = 1.0,
+) -> torch.Tensor:
+    """Potential-based reward for reducing absolute target yaw error when approaching the goal.
+
+    Awards positive reward when rotating toward the target heading and penalizes turning away.
+    Smoothly gates in as dist < distance_threshold.
+    Mathematically conservative (telescoping sum), immune to spinning exploits.
+    """
+    goal_cmd: RobotNavigationGoalCommand = env.command_manager.get_term(command_name)
+    dist = torch.norm(goal_cmd._get_unscaled_command()[:, :2], dim=1)
+    gate = torch.clamp(1.0 - dist / distance_threshold, min=0.0, max=1.0)
+
+    yaw_err, _ = _compute_realtime_yaw_error(env, goal_cmd)
+    abs_yaw_err = torch.abs(yaw_err)
+
+    if not hasattr(env, "_prev_target_yaw_err"):
+        env._prev_target_yaw_err = abs_yaw_err.clone()
+        return torch.zeros_like(abs_yaw_err)
+
+    progress = env._prev_target_yaw_err - abs_yaw_err
+    env._prev_target_yaw_err = abs_yaw_err.clone()
+
+    just_reset = env.episode_length_buf <= 1
+    if just_reset.any():
+        progress[just_reset] = 0.0
+
+    progress = torch.clamp(progress, min=-1.0, max=1.0) / env.step_dt
+
+    return gate * progress
 
 
 def velocity_at_goal_heading_penalty(
@@ -356,9 +447,31 @@ def velocity_at_goal_heading_penalty(
     lin_vel_2d = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
     ang_vel_z = torch.abs(asset.data.root_ang_vel_b[:, 2])
 
-    yaw_err = getattr(goal_cmd, "target_yaw_error", torch.zeros_like(dist))
+    yaw_err, _ = _compute_realtime_yaw_error(env, goal_cmd)
     heading_aligned = (torch.abs(yaw_err) < heading_tolerance).float()
 
     return at_goal * (lin_vel_2d + 0.5 * heading_aligned * ang_vel_z)
+
+
+def velocity_at_goal_linear_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "robot_goal",
+    distance_threshold: float = 0.5,
+    speed_deadzone: float = 0.2,
+) -> torch.Tensor:
+    """Penalize excessive linear velocity inside goal radius to promote stable braking.
+
+    Leaves angular velocity completely unpenalized so the robot is free to rotate in place.
+    """
+    goal_cmd: RobotNavigationGoalCommand = env.command_manager.get_term(command_name)
+    dist = torch.norm(goal_cmd._get_unscaled_command()[:, :2], dim=1)
+    at_goal = (dist < distance_threshold).float()
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    lin_vel_2d = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
+    excess_lin_vel = torch.clamp(lin_vel_2d - speed_deadzone, min=0.0)
+
+    return at_goal * excess_lin_vel
 
 

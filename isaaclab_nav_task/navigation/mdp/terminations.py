@@ -216,48 +216,91 @@ def at_goal_with_heading_navigation(
     env: "ManagerBasedRLEnv",
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     distance_threshold: float = 0.4,
-    heading_threshold: float = 0.1745,  # ~10 degrees
+    heading_threshold: float = 0.35,  # ~20 degrees
     goal_cmd_name: str = "robot_goal",
+    velocity_threshold: float = 0.45,  # Relaxed linear velocity threshold for arrival
+    dwell_time_range: tuple[float, float] = (5.0, 2.0),  # Curriculum: 5.0s -> 2.0s
+    curriculum_success_range: tuple[float, float] = (0.2, 0.7),  # Dynamic interpolation based on success rate
+    required_align_steps: int = 3,  # Consecutive steps required to confirm alignment (0.3s)
+    fixed_dwell_time: float | None = 5.0,  # Fixed generous adjustment window (e.g. 5.0s = 50 steps), overrides dynamic shrinking
 ) -> torch.Tensor:
-    """Terminate the episode when both distance and heading criteria are met at the goal.
+    """Terminate the episode when both distance and heading criteria are met at the goal (success),
+    or when the arrival adjustment window expires without aligning heading (dwell failure).
 
-    Args:
-        env: The learning environment.
-        asset_cfg: The name of the robot asset.
-        distance_threshold: The distance threshold to the goal.
-        heading_threshold: The heading error threshold in radians (~10 deg = 0.1745 rad).
-        goal_cmd_name: The name of the goal command term.
-
-    Returns:
-        Boolean tensor indicating whether the goal is reached with correct orientation.
+    Curriculum: When fixed_dwell_time is None, the allowed adjustment window starts at dwell_time_range[0] (5.0s)
+    and automatically scales down to dwell_time_range[1] (2.0s) as success rate rises.
+    When fixed_dwell_time is provided (e.g. 5.0s), it provides a constant generous window for in-place braking & alignment.
     """
     from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
+    import math
 
     asset: Articulation = env.scene[asset_cfg.name]
     goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms.get(goal_cmd_name)
 
+    # 1. Compute distance and real-time yaw error directly from quaternion
     xy_error = torch.norm(goal_cmd_generator._get_unscaled_command()[:, :2], dim=1)
-    yaw_err = getattr(goal_cmd_generator, "target_yaw_error", torch.zeros_like(xy_error))
+    if hasattr(goal_cmd_generator, "goal_heading_world"):
+        q = asset.data.root_quat_w
+        robot_yaw = torch.atan2(2.0 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1.0 - 2.0 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        yaw_err = (goal_cmd_generator.goal_heading_world - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
+    else:
+        yaw_err = getattr(goal_cmd_generator, "target_yaw_error", torch.zeros_like(xy_error))
     lin_vel_2d = torch.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
 
-    # Condition: distance < threshold, heading error < threshold, and settled (not flying through)
-    at_goal = (xy_error < distance_threshold) & (torch.abs(yaw_err) < heading_threshold) & (lin_vel_2d < 0.25)
+    # 2. Check circle entry and lock one-way adjustment state (cannot be reset by boundary jitter)
+    in_circle = xy_error < distance_threshold
+    if hasattr(goal_cmd_generator, "is_adjusting_heading"):
+        goal_cmd_generator.is_adjusting_heading |= in_circle
+        is_adjusting = goal_cmd_generator.is_adjusting_heading
+    else:
+        is_adjusting = in_circle
 
-    if not hasattr(goal_cmd_generator, "heading_time_at_goal_in_steps"):
-        goal_cmd_generator.heading_time_at_goal_in_steps = torch.zeros(env.num_envs, device=env.device)
+    # 3. Dynamic adjustment window duration or fixed generous window
+    if fixed_dwell_time is not None and fixed_dwell_time > 0:
+        allowed_time_s = fixed_dwell_time
+    else:
+        sr = torch.mean(goal_cmd_generator.success_tracker.get_success_rate()).item()
+        sr_min, sr_max = curriculum_success_range
+        progress = max(0.0, min(1.0, (sr - sr_min) / max(1e-4, sr_max - sr_min)))
+        allowed_time_s = dwell_time_range[0] - progress * (dwell_time_range[0] - dwell_time_range[1])
+    max_dwell_steps = max(10, int(allowed_time_s / env.step_dt))
 
-    goal_cmd_generator.heading_time_at_goal_in_steps[at_goal] += 1
-    goal_cmd_generator.heading_time_at_goal_in_steps[~at_goal] = 0
+    # 4. Advance dwell counter for environments currently adjusting
+    if hasattr(goal_cmd_generator, "adjust_dwell_steps"):
+        goal_cmd_generator.adjust_dwell_steps[is_adjusting] += 1
+        curr_dwell = goal_cmd_generator.adjust_dwell_steps
+    else:
+        curr_dwell = torch.zeros(env.num_envs, device=env.device)
 
-    required_steps = max(2, int(0.4 / env.step_dt))
-    termination = goal_cmd_generator.heading_time_at_goal_in_steps >= required_steps
+    # 5. Check heading alignment condition
+    aligned = is_adjusting & (torch.abs(yaw_err) < heading_threshold) & (lin_vel_2d < velocity_threshold)
+    if hasattr(goal_cmd_generator, "align_consecutive_steps"):
+        goal_cmd_generator.align_consecutive_steps[aligned] += 1
+        goal_cmd_generator.align_consecutive_steps[~aligned] = 0
+        consecutive_aligned = goal_cmd_generator.align_consecutive_steps
+    else:
+        consecutive_aligned = torch.zeros(env.num_envs, device=env.device)
 
-    env_ids = torch.where(termination)[0]
-    if env_ids.numel() > 0:
-        goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
-        goal_cmd_generator.heading_time_at_goal_in_steps[env_ids] = 0
+    # 6. Branch A: Success Termination
+    success_termination = consecutive_aligned >= required_align_steps
 
-    return termination
+    # 7. Branch B: Dwell Timeout Failure Termination
+    dwell_termination = is_adjusting & (curr_dwell >= max_dwell_steps) & (~success_termination)
+
+    # Handle outcomes (recorded in buffers for metrics and reward terms)
+    success_ids = torch.where(success_termination)[0]
+    if success_ids.numel() > 0:
+        goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(success_termination, dtype=torch.float), success_ids)
+        if hasattr(goal_cmd_generator, "heading_terminal_outcome"):
+            goal_cmd_generator.heading_terminal_outcome[success_ids] = 1.0
+
+    dwell_fail_ids = torch.where(dwell_termination)[0]
+    if dwell_fail_ids.numel() > 0:
+        goal_cmd_generator.goal_reached_buffer.add(torch.zeros_like(dwell_termination, dtype=torch.float), dwell_fail_ids)
+        if hasattr(goal_cmd_generator, "heading_terminal_outcome"):
+            goal_cmd_generator.heading_terminal_outcome[dwell_fail_ids] = -1.0
+
+    return success_termination | dwell_termination
 
 
 
