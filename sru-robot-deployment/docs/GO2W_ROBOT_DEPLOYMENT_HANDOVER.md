@@ -180,7 +180,7 @@ ros2 topic pub /goal_pose geometry_msgs/PoseStamped \
   "{header: {frame_id: 'odom'}, pose: {position: {x: 1.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}" --once
 ```
 
-> **完整纯命令行执行手册**：参见 [GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](file:///home/yichangfeng/sru-navigation-learning/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md)。
+> **完整纯命令行执行手册**：参见 [GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md)。
 
 ---
 

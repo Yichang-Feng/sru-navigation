@@ -2,7 +2,7 @@
 
 > **文档版本**：v1.2 (实机工程实现落地与接口变量规范版)  
 > **更新时间**：2026-10-30  
-> **代码落地路径**：`go2w_robot_ref/sru_ws/src/sru-robot-deployment/rl_nav_controller`  
+> **代码落地路径**：`sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller`  
 > **适用机型**：Unitree Go2W 轮足机器人 (机载 Jetson Orin DevKit, ROS 2 Humble)  
 > **系统层级**：上层全局规划调度层 $\longleftrightarrow$ 机载 RL 局部避障控制器 (`rl_nav_controller`) $\longleftrightarrow$ 宇树底盘桥接 (`unitree_bridge`)
 
@@ -349,7 +349,7 @@ P0 (起点,狗当前位) ------ P1 (1m) ------ P2 (2m 障碍物) ------ P3 (3m) 
 
 ## 8. 代码实现落地与新增变量/逻辑完全手册 (Implementation Details & Variable Reference)
 
-本规范所定义的分段推进、多状态瞬发上报、动态胡萝卜点前瞻、停滞检测以及底盘自解锁能力已在 `go2w_robot_ref/sru_ws/src/sru-robot-deployment/rl_nav_controller` 源码中完整落地。
+本规范所定义的分段推进、多状态瞬发上报、动态胡萝卜点前瞻、停滞检测以及底盘自解锁能力已在 `sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller` 源码中完整落地。
 
 ### 8.1 模块与文件变更清单
 

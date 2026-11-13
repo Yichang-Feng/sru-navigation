@@ -26,7 +26,7 @@
 - 若无人工干预，机器狗绝不进入小门，判定此处为不可通行区域。
 
 ### 2.2 关键实验验证结论（调整前瞻距离为 $L = 0.5\text{m}$）
-通过开发支持命令行动态前瞻控制的启动脚本 [`start_nav_custom.sh`](file:///home/yichangfeng/sru-navigation-learning/scripts/start_nav_custom.sh)，将前瞻胡萝卜点距离调整为 **$0.5\text{m}$** 再次测试：
+通过开发支持命令行动态前瞻控制的启动脚本 [`start_nav_custom.sh`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/scripts/start_nav_custom.sh)，将前瞻胡萝卜点距离调整为 **$0.5\text{m}$** 再次测试：
 $$\text{命令：}\quad \texttt{./start_nav_custom.sh 0.5}$$
 * **实验结果**：**机器狗成功且平稳地正对门洞，顺畅穿过了狭小门！**
 * **归因证实**：该实验现象**100% 证实**了此前拒绝进门的核心根因——**并非传感器故障或硬件损坏，而是前瞻距离（Lookahead Distance）与狭窄几何环境之间的矛盾**。
@@ -175,13 +175,13 @@ python3 ~/go2w_nav_ros2_ws/door_diagnostic_logger.py fail_2.0m
 
 | 文件路径（开发机） | 机载路径（agile@192.168.31.186） | 职责说明 |
 |:---|:---|:---|
-| [`rl_nav_controller.py`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py` | 核心强化学习避障与路径跟踪节点（包含前瞻提取、容错不上报） |
-| [`scripts/constants.py`](file:///home/yichangfeng/sru-navigation-learning/scripts/constants.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py` | 手柄按键映射（A=启动，B=暂停刹停）与参数基准 |
-| [`scripts/rl_nav_controller.launch.py`](file:///home/yichangfeng/sru-navigation-learning/scripts/rl_nav_controller.launch.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/launch/rl_nav_controller.launch.py` | ROS 2 Launch 启动脚本（支持 `lookahead_distance` 与 `report_failure` 传参） |
-| [`scripts/start_nav_custom.sh`](file:///home/yichangfeng/sru-navigation-learning/scripts/start_nav_custom.sh) | `~/go2w_nav_ros2_ws/start_nav_custom.sh` | 自定义前瞻距离 & 容错启动脚本（默认后台多节点 tmux 架构） |
-| [`scripts/door_diagnostic_logger.py`](file:///home/yichangfeng/sru-navigation-learning/scripts/door_diagnostic_logger.py) | `~/go2w_nav_ros2_ws/door_diagnostic_logger.py` | 窄门导航诊断记录工具（保存 40x64 热力图与目标向量） |
-| [`scripts/sync_to_go2w_nav.sh`](file:///home/yichangfeng/sru-navigation-learning/scripts/sync_to_go2w_nav.sh) | - | 开发机一键向狗机推流同步与自动化构建脚本 |
-| [`docs/GO2W_DOOR_NAVIGATION_HANDOVER.md`](file:///home/yichangfeng/sru-navigation-learning/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md) | - | 本技术交接文档 |
+| [`rl_nav_controller.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py` | 核心强化学习避障与路径跟踪节点（包含前瞻提取、容错不上报） |
+| [`constants.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py` | 手柄按键映射（A=启动，B=暂停刹停）与参数基准 |
+| [`rl_nav_controller.launch.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/launch/rl_nav_controller.launch.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/launch/rl_nav_controller.launch.py` | ROS 2 Launch 启动脚本（支持 `lookahead_distance` 与 `report_failure` 传参） |
+| [`start_nav_custom.sh`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/scripts/start_nav_custom.sh) | `~/go2w_nav_ros2_ws/start_nav_custom.sh` | 自定义前瞻距离 & 容错启动脚本（默认后台多节点 tmux 架构） |
+| [`door_diagnostic_logger.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/diagnostics/door_diagnostic_logger.py) | `~/go2w_nav_ros2_ws/door_diagnostic_logger.py` | 窄门导航诊断记录工具（保存 40x64 热力图与目标向量） |
+| [`sync_to_go2w_nav.sh`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/scripts/sync_to_go2w_nav.sh) | - | 开发机一键向狗机推流同步与自动化构建脚本 |
+| [`GO2W_DOOR_NAVIGATION_HANDOVER.md`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md) | - | 本技术交接文档 |
 
 ---
 

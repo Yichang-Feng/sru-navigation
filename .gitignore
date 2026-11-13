@@ -82,9 +82,12 @@ docs/BENCHMARK_AND_DEADZONE_TEST_GUIDE.md
 docs/POLICY_BENCHMARK_AND_COMPARISON_GUIDE.md
 .paper-notes/
 
-# Deployment model weights (too large for git; export from training then scp to robot)
-sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/*.onnx
-sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/*.pt
-sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/*.pth
-# Keep the .gitkeep placeholder
-!sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/.gitkeep
+# Deployment workspaces build artifacts and models
+sru-robot-deployment/**/build/
+sru-robot-deployment/**/install/
+sru-robot-deployment/**/log/
+sru-robot-deployment/**/deployment_policies/*.onnx
+sru-robot-deployment/**/deployment_policies/*.pt
+sru-robot-deployment/**/deployment_policies/*.pth
+!sru-robot-deployment/**/deployment_policies/.gitkeep
+map_all.pcd

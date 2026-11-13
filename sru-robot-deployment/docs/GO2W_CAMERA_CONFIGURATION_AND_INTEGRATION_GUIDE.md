@@ -90,7 +90,7 @@
    策略网络根本不需要彩色图，开启对齐白白增加 15~30ms 时延与机载 CPU/GPU 内存拷贝开销。
 
 ### 3. 驱动层参数覆盖配置 (`realsense_nav_override.yaml`)
-配置文件位于：[`src/rl_nav_controller/config/realsense_nav_override.yaml`](file:///home/yichangfeng/sru-navigation-learning/scripts/realsense_nav_override.yaml)
+配置文件位于：[`src/rl_nav_controller/config/realsense_nav_override.yaml`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/config/realsense_nav_override.yaml)
 ```yaml
 /**:
     ros__parameters:
@@ -157,7 +157,7 @@ ros2 launch realsense2_camera rs_launch.py \
 ZED 2i 原生驱动全开时包含 RGB、点云、视觉 SLAM（VIO）、空间测绘等大量派生流，单帧处理延迟高达 ~75ms，极易因 Jetson GPU 争抢导致深度卡顿撞障。系统通过专用参数文件实现彻底轻量化减负：
 
 ### 3. 驱动层参数覆盖配置 (`zed_nav_override.yaml`)
-配置文件位于：[`src/rl_nav_controller/config/zed_nav_override.yaml`](file:///home/yichangfeng/sru-navigation-learning/scripts/zed_nav_override.yaml)
+配置文件位于：[`src/rl_nav_controller/config/zed_nav_override.yaml`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/config/zed_nav_override.yaml)
 ```yaml
 /**:
     ros__parameters:
@@ -213,7 +213,7 @@ ros2 launch zed_wrapper zed_camera.launch.py \
 
 ## 五、 控制器内部统一预处理与量程处理逻辑 (`depth_callback`)
 
-在 [`rl_nav_controller.py`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller.py#L1220-L1250) 中，无论接入哪款相机，均通过以下严密机制完成无缝标准化：
+在 [`rl_nav_controller.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py#L1220-L1250) 中，无论接入哪款相机，均通过以下严密机制完成无缝标准化：
 
 ```python
 # 1. 自动格式识别与单位统一至浮点“米”

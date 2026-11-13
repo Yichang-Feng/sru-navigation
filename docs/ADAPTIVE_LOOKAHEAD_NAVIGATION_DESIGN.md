@@ -187,7 +187,7 @@ $$v_x \propto \ln(d + 1.0)$$
 当 $L=0.5\text{m}$ 时，$\ln(1.5) \approx 0.405$，网络自然输出爬行速度（$0.15 \sim 0.25\text{m/s}$）。
 
 ### 6.2 动力学补偿判据
-在控制器的命令发布阶段（[`rl_nav_controller_adaptive.py:L1248-L1258`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller_adaptive.py#L1248-L1258)）：
+在控制器的命令发布阶段（[`rl_nav_controller_adaptive.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py#L1248-L1258)）：
 1. 检查机器人是否处于窄门穿行锁存状态：$\text{in\_narrow} == \text{True}$；
 2. 提取机身体系下的目标向量横纵分量 $[t_{x,b}, t_{y,b}]$，计算当前航向对准偏差：
    $$\text{yaw\_err} = \text{atan2}(t_{y,b}, \; t_{x,b})$$
@@ -220,12 +220,12 @@ $$v_x \propto \ln(d + 1.0)$$
 
 | 算法功能块 | 实现文件 | 核心函数 / 类 |
 |:---|:---|:---|
-| 折线投影与前瞻提取基类 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/adaptive_path_tracker.py#L38-L188) | `PathSegmentTracker.update_progress`<br/>`PathSegmentTracker.get_lookahead_point` |
-| 滑动窗口曲率自适应因子 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/adaptive_path_tracker.py#L248-L300) | `AdaptivePathSegmentTracker.compute_path_curvature_lookahead` |
-| 局部净空与空间锁存器 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/adaptive_path_tracker.py#L302-L352) | `AdaptivePathSegmentTracker.evaluate_passage_clearance` |
-| Slew-Rate 限幅与综合插值 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/adaptive_path_tracker.py#L354-L408) | `AdaptivePathSegmentTracker.get_adaptive_lookahead_point` |
-| 自适应 ROS 2 控制器主节点 | [`rl_nav_controller_adaptive.py`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller_adaptive.py#L1160-L1180) | `NavigationPolicyNode.generate_cmd_vel` |
-| 门洞航向对齐推力补偿 | [`rl_nav_controller_adaptive.py`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller_adaptive.py#L1250-L1260) | `NavigationPolicyNode.generate_cmd_vel` |
+| 折线投影与前瞻提取基类 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py#L38-L188) | `PathSegmentTracker.update_progress`<br/>`PathSegmentTracker.get_lookahead_point` |
+| 滑动窗口曲率自适应因子 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py#L248-L300) | `AdaptivePathSegmentTracker.compute_path_curvature_lookahead` |
+| 局部净空与空间锁存器 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py#L302-L352) | `AdaptivePathSegmentTracker.evaluate_passage_clearance` |
+| Slew-Rate 限幅与综合插值 | [`adaptive_path_tracker.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py#L354-L408) | `AdaptivePathSegmentTracker.get_adaptive_lookahead_point` |
+| 自适应 ROS 2 控制器主节点 | [`rl_nav_controller_adaptive.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py#L1160-L1180) | `NavigationPolicyNode.generate_cmd_vel` |
+| 门洞航向对齐推力补偿 | [`rl_nav_controller_adaptive.py`](file:///home/yichangfeng/sru-navigation-learning/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py#L1250-L1260) | `NavigationPolicyNode.generate_cmd_vel` |
 | 算法离线场景仿真验证套件 | [`scripts/test_adaptive_lookahead.py`](file:///home/yichangfeng/sru-navigation-learning/scripts/test_adaptive_lookahead.py#L30-L170) | `test_straight_then_90deg_right_turn`<br/>`test_narrow_passage_and_spatial_latching` |
 
 ---

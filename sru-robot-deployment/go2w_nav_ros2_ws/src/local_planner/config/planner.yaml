@@ -1,0 +1,145 @@
+# 局部规划器实机参数：距离 m，时间 s，角度仅标注 deg 的项使用度。
+# 修改后重启节点；话题重映射在 run.launch.py 的启动参数中设置。
+local_planner_node:
+  ros__parameters:
+    # 是否使用 ROS /clock 时间；实机通常为 false。
+    use_sim_time: false
+
+    # 已走过的计划轨迹距离达到此值才周期重规划，单位 m。
+    fsm.thresh_replan: 1.0
+    # 距参考终点小于此距离时不再周期重规划，单位 m。
+    fsm.thresh_no_replan: 0.1
+    # 沿参考路线选取局部目标的前视路程，单位 m。
+    fsm.planning_horizon: 2.5
+    # 碰撞预计在此时间内发生且重规划失败时紧急停车，单位 s。
+    fsm.emergency_time: 1.0
+    # 允许在速度足够低后从可恢复的紧急停车状态重新规划。
+    fsm.fail_safe: true
+    # 连续规划失败次数上限；达到后停车并等待新参考路径。
+    fsm.max_replan_fail_count: 1000
+    # 路径坐标系到规划坐标系 TF 的最大允许时龄，单位 s。
+    fsm.reference_tf_max_age: 0.3
+    # 参考 TF 不可用的宽限时间；超时输出停车轨迹，单位 s。
+    fsm.reference_tf_grace: 0.5
+    # 定位修正导致映射位置变化超过此值时重新规划，单位 m。
+    fsm.reference_tf_jump_translation: 0.2
+    # 定位修正的偏航跳变阈值，单位度。
+    fsm.reference_tf_jump_yaw_deg: 5.0
+
+    # 占据栅格边长，单位 m；越小内存和计算开销越大。
+    grid_map.resolution: 0.05
+    # 滑动地图 X 方向总长度，单位 m。
+    grid_map.sliding_map_size_x: 6.0
+    # 滑动地图 Y 方向总长度，单位 m。
+    grid_map.sliding_map_size_y: 6.0
+    # 滑动地图 Z 方向总高度，单位 m。
+    grid_map.sliding_map_size_z: 4.0
+    # 传感器附近 X 方向局部更新半范围，单位 m。
+    grid_map.local_update_range_x: 4.0
+    # 传感器附近 Y 方向局部更新半范围，单位 m。
+    grid_map.local_update_range_y: 4.0
+    # 传感器附近 Z 方向局部更新半范围，单位 m。
+    grid_map.local_update_range_z: 2.5
+    # 是否让地图随传感器移动，离开窗口的历史栅格会清理。
+    grid_map.map_sliding_en: true
+    # 触发地图窗口移动的距离阈值，单位 m。
+    grid_map.map_sliding_thresh: 0.2
+    # 双圆柱机身碰撞模型中每个圆柱的水平半径，单位 m。
+    grid_map.double_cylinder_radius: 0.25
+    # 两个圆柱中心沿机身前后方向相对中心的偏移量，单位 m。
+    grid_map.double_cylinder_offset: 0.25
+    # 参考路径 Z 的附加高度，单位 m；全局路径已含机身高度时保持 0。
+    grid_map.body_height: 0.0
+    # 机身碰撞查询向上的垂向膨胀量，单位 m。
+    grid_map.obstacles_inflation_z_up: 0.1
+    # 机身碰撞查询向下的垂向膨胀量，单位 m。
+    grid_map.obstacles_inflation_z_down: 0.1
+    # 建图、局部 B 样条及 /local_path 所在的规划坐标系。
+    grid_map.frame_id: world
+    # 用于显示滑动地图窗口原点的 TF 子坐标系。
+    grid_map.sliding_map_frame_id: sliding_map
+    # 初始地图底面 Z 坐标，单位 m；滑动后窗口会更新。
+    grid_map.ground_height: 0.0
+    # 建图输入类型：lidar 点云或 depth 深度图；launch 参数可覆盖。
+    grid_map.sensor_type: lidar
+    # true 表示点云坐标已经在规划坐标系中，无需再次按传感器姿态变换。
+    grid_map.cloud_is_world: true
+    # 是否对输入传感器里程计应用 grid_map.cpp 中保留的实机外参。
+    grid_map.need_extrinsic: true
+
+    # 深度相机主点横坐标，单位像素，仅 depth 模式使用。
+    grid_map.cx: 317.19183349609375
+    # 深度相机主点纵坐标，单位像素，仅 depth 模式使用。
+    grid_map.cy: 256.4806823730469
+    # 深度相机 X 方向焦距，单位像素，仅 depth 模式使用。
+    grid_map.fx: 609.5884399414062
+    # 深度相机 Y 方向焦距，单位像素，仅 depth 模式使用。
+    grid_map.fy: 609.22021484375
+    # 保留深度值的最大距离，单位 m。
+    grid_map.depth_filter_maxdist: 3.0
+    # 保留深度值的最小距离，单位 m。
+    grid_map.depth_filter_mindist: 0.3
+    # 深度图边缘不参与投影的像素宽度。
+    grid_map.depth_filter_margin: 1
+    # 原始深度值到米的除数；16 位毫米深度通常为 1000。
+    grid_map.k_depth_scaling_factor: 1000.0
+    # 深度图横纵方向的采样像素步长；越大计算量越小。
+    grid_map.skip_pixel: 2
+
+    # 射线端点观测为障碍物时的占据概率增量来源，范围 (0, 1)。
+    grid_map.p_hit: 0.85
+    # 射线经过自由空间时的占据概率增量来源，通常小于 0.5。
+    grid_map.p_miss: 0.30
+    # 融合占据概率的下限，防止反复空闲观测无限累积。
+    grid_map.p_min: 0.12
+    # 融合占据概率的上限，防止反复命中观测无限累积。
+    grid_map.p_max: 0.98
+    # 判定栅格被占据的概率阈值。
+    grid_map.p_occ: 0.80
+    # 用于占据更新的最大射线长度，单位 m。
+    grid_map.max_ray_length: 5.0
+    # 只显示不高于传感器 Z 加此值的地图点，单位 m；不改变碰撞地图。
+    grid_map.vis_height: 0.3
+    # 是否输出占据更新耗时统计。
+    grid_map.show_occ_time: false
+
+    # 规划管理器的速度限值，单位 m/s；不会直接设置 path_follow 的速度。
+    manager.max_vel: 1.0
+    # 规划管理器的加速度限值，单位 m/s²。
+    manager.max_acc: 0.5
+    # 保留的 jerk 参数，单位 m/s³；当前未作为独立硬约束检查。
+    manager.max_jerk: 4.0
+    # 初始轨迹控制点的目标间距，单位 m。
+    manager.control_points_distance: 0.2
+    # 时间重分配可行性检查的相对容差，无量纲。
+    manager.feasibility_tolerance: 0.5
+    # 初始路径长度异常检查的参考范围，单位 m；局部目标前视由 fsm 决定。
+    manager.planning_horizon: 3.5
+
+    # 平滑代价的权重；越大越偏向平滑的控制点序列。
+    optimization.lambda_smooth: 1.0
+    # 障碍碰撞惩罚的权重。
+    optimization.lambda_collision: 1.0
+    # 速度、加速度可行性惩罚的权重。
+    optimization.lambda_feasibility: 0.1
+    # 精修时贴合参考路径的代价权重。
+    optimization.lambda_fitness: 1.0
+    # 障碍距离惩罚期望的安全间距，单位 m。
+    optimization.dist0: 0.2
+    # 优化器速度软约束阈值，单位 m/s。
+    optimization.max_vel: 1.0
+    # 优化器加速度软约束阈值，单位 m/s²。
+    optimization.max_acc: 0.5
+    # B 样条次数；当前规划流程使用三次样条，应保持 3。
+    optimization.order: 3
+
+    # B 样条几何路径输出；用于 path_follow 的局部路径输入。
+    # 按样条时间采样的间隔，单位 s；越小点越密，不代表跟踪器执行频率。
+    local_path.sample_dt: 0.05
+    # 路径心跳发布频率，单位 Hz，允许范围 [1, 100]；应大于跟踪超时倒数并留余量。
+    # 默认 10 Hz 与 path_follow 默认 local_path_timeout=0.5 s 配合使用。
+    local_path.publish_rate: 10.0
+    # 动态可行性最终检查的附加速度容差，单位 m/s，沿用原代码默认值。
+    optimization.vel_tolerance: 1.0
+    # 动态可行性最终检查的附加加速度容差，单位 m/s²，沿用原代码默认值。
+    optimization.acc_tolerance: 1.0

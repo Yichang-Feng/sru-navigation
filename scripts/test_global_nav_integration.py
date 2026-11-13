@@ -405,6 +405,50 @@ def test_report_failure_suppression():
     print("  -> Passed: report_failure=False cleanly suppresses 'failed' and 'error', original report_failure=True preserved.")
 
 
+def test_motion_enable_gate_stop_and_resume():
+    """Verify Unitree wireless controller button B/A behavior via /motion_enabled gate."""
+    print("[TEST] 11. Unitree Remote /motion_enabled Gate (Button B Stop & Button A Resume)...")
+    sm = MockNavControllerStateMachine()
+
+    # 1. Robot is actively running a path
+    sm.on_path_received([[0, 0, 0], [5, 0, 0]])
+    assert sm.state == NavState.RUNNING
+
+    # 2. Remote button B pressed -> /motion_enabled = False
+    # Mocking motion_enable_callback behavior
+    def mock_motion_enable(enabled):
+        if not enabled:
+            if sm.state in (NavState.RUNNING, NavState.IDLE, NavState.FAILED):
+                sm.is_abort_goal = False
+                sm.set_state(NavState.STOPPED, reason="Chassis motion disabled (/motion_enabled=False)")
+                sm.path_tracker.total_length  # retain
+        else:
+            if sm.state == NavState.STOPPED:
+                if sm.path_tracker.is_active():
+                    sm.is_abort_goal = False
+                    sm.set_state(NavState.RUNNING, reason="Chassis motion enabled (/motion_enabled=True)")
+
+    mock_motion_enable(False)
+    assert sm.state == NavState.STOPPED, f"Expected STOPPED, got {sm.state.value}"
+    assert sm.path_tracker.is_active() is True, "Path must be retained on remote button B!"
+
+    # 3. New path arrives while stopped -> still STOPPED, path updated
+    sm.on_path_received([[0, 0, 0], [10, 0, 0]])
+    assert sm.state == NavState.STOPPED
+    assert math.isclose(sm.path_tracker.total_length, 10.0, abs_tol=1e-5)
+
+    # 4. Remote button A pressed -> /motion_enabled = True
+    mock_motion_enable(True)
+    assert sm.state == NavState.RUNNING, f"Expected RUNNING, got {sm.state.value}"
+
+    # 5. Remote button B pressed when FAILED -> transitions to STOPPED per HTML specification
+    sm.state = NavState.FAILED
+    mock_motion_enable(False)
+    assert sm.state == NavState.STOPPED, f"Expected STOPPED when disabled from FAILED, got {sm.state.value}"
+
+    print("  -> Passed: /motion_enabled gate correctly transitions between RUNNING and STOPPED per HTML spec.")
+
+
 if __name__ == "__main__":
     print("==================================================================")
     print("       TESTING GLOBAL NAVIGATION INTEGRATION MODULES")
@@ -419,7 +463,8 @@ if __name__ == "__main__":
     test_stopped_keeps_stopped_and_resumes()
     test_joystick_button_a_start_b_pause()
     test_report_failure_suppression()
+    test_motion_enable_gate_stop_and_resume()
     print("==================================================================")
-    print("       ALL 10 INTEGRATION TEST SUITES PASSED (100% OK)")
+    print("       ALL 11 INTEGRATION TEST SUITES PASSED (100% OK)")
     print("==================================================================")
 

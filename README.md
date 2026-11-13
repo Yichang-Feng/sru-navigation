@@ -55,12 +55,15 @@ sru-navigation-learning/
 │   ├── play_go2w.sh               #   加载权重仿真回放（GUI 可视化）
 │   └── logs/rsl_rl/               #   训练日志与权重 checkpoint
 │
-├── sru-robot-deployment/          # 🤖 实机部署代码（见下方说明）
-│   ├── ros2_ws/src/rl_nav_controller/  # ROS 2 导航功能包（同步至机载）
-│   ├── scripts/                   #   启动/停止/同步脚本
-│   ├── config/                    #   RViz 配置
-│   ├── diagnostics/               #   诊断与测试工具
-│   └── docs/                      #   实机部署文档集合
+├── sru-robot-deployment/          # 🤖 实机部署代码（含两大完整机载工作空间）
+│   ├── go2w_nav_ros2_ws/          #   对应机载 ~/go2w_nav_ros2_ws/ (高层导航栈)
+│   │   └── src/                   #     含 rl_nav_controller, global_planner, path_follow 等
+│   ├── bridge_ws/                 #   对应机载 ~/bridge_ws/ (底盘通信与传感器驱动)
+│   │   └── src/                   #     含 unitree_bridge, zed-ros2-wrapper, super_lio 等
+│   ├── scripts/                   #   一键同步/部署脚本 (sync_to_go2w_nav.sh 等)
+│   ├── docs/                      #   实机部署文档集合 (软硬件拓扑/排坑指南)
+│   ├── diagnostics/               #   诊断与测试工具 (door_diagnostic_logger 等)
+│   └── README.md                  #   机载路径完全映射对照表
 │
 ├── scripts/                       # 🔧 开发侧工具脚本（不推送至机器狗）
 │   ├── export_onnx.py             #   训练后导出 ONNX 模型
@@ -167,12 +170,12 @@ tensorboard --logdir IsaacLab/logs/rsl_rl/go2w_navigation_ppo
 # 导出标准导航策略（含 VAE 编码器）
 python scripts/export_onnx.py \
   --checkpoint IsaacLab/logs/rsl_rl/go2w_navigation_ppo/model_best.pt \
-  --output sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
+  --output sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
 
 # 验证导出结果
 python -c "
 import onnxruntime as ort
-sess = ort.InferenceSession('sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx')
+sess = ort.InferenceSession('sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx')
 print('输入:', [i.name for i in sess.get_inputs()])
 print('输出:', [o.name for o in sess.get_outputs()])
 print('✓ ONNX 导出验证通过')
@@ -183,7 +186,7 @@ print('✓ ONNX 导出验证通过')
 
 ## 三、实机部署
 
-> **详细部署文档**：[sru-robot-deployment/README.md](sru-robot-deployment/README.md)（含机载目录路径对照表）  
+> **详细部署文档**：[sru-robot-deployment/README.md](sru-robot-deployment/README.md)（含机载目录路径完全对照表）  
 > **必读交接文档**：[sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md)
 
 ### 机器狗网络拓扑
@@ -216,7 +219,7 @@ print('✓ ONNX 导出验证通过')
 bash sru-robot-deployment/scripts/sync_to_go2w_nav.sh
 
 # 同时推送 ONNX 模型权重
-scp sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
+scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
     agile@10.3.42.161:~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/
 ```
 

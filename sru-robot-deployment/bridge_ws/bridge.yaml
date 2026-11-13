@@ -1,0 +1,25 @@
+topics:
+  -
+    topic: /cmd_vel  # Topic name on both ROS 1 and ROS 2
+    type: geometry_msgs/msg/Twist  # Type of topic to bridge
+    queue_size: 1  # Queue size
+  -
+    topic: /startNavi  # Topic name on both ROS 1 and ROS 2
+    type: std_msgs/msg/Bool  # Type of topic to bridge
+    queue_size: 1  # Queue size
+  -
+    topic: /terrain_mode_switch  # Topic name on both ROS 1 and ROS 2
+    type: std_msgs/msg/Bool  # Type of topic to bridge
+    queue_size: 1  # Queue size
+  -
+    topic: /cmd_vel_lf  # Topic name on both ROS 1 and ROS 2
+    type: geometry_msgs/msg/Twist  # Type of topic to bridge
+    queue_size: 1  # Queue size
+  -
+    topic: /localization
+    type: nav_msgs/msg/Odometry
+    queue_size: 1
+  -
+    topic: /goal
+    type: geometry_msgs/msg/PoseStamped
+    queue_size: 1

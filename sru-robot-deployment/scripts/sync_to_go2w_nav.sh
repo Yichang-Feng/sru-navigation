@@ -12,7 +12,12 @@ set -e
 ROBOT_IP="${1:-${ROBOT_IP:-192.168.31.186}}"
 ROBOT_USER="agile"
 
-LOCAL_WS="/home/yichangfeng/go2w_robot_ref/go2w_nav_ros2_ws"
+DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -d "${DEPLOY_DIR}/go2w_nav_ros2_ws/src/rl_nav_controller" ]; then
+    LOCAL_WS="${DEPLOY_DIR}/go2w_nav_ros2_ws"
+else
+    LOCAL_WS="/home/yichangfeng/go2w_robot_ref/go2w_nav_ros2_ws"
+fi
 SRC_PKG_DIR="${LOCAL_WS}/src/rl_nav_controller"
 
 echo "=================================================================="
