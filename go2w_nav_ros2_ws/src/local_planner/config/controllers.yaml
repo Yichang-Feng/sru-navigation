@@ -1,0 +1,27 @@
+# 由 scan_planner 迁移的实机闭环控制器，仅包含闭环参数，不包含仿真或开环节点。
+closed_loop_controller:
+  ros__parameters:
+    # launch 会与规划器统一时钟和规划坐标系。
+    use_sim_time: false
+    # B 样条控制点及机身里程计所在坐标系，必须与 grid_map.frame_id 一致。
+    frame_id: world
+    # 偏航方向估计的前视时间，单位 s。
+    time_forward: 0.8
+    # 朝向误差超过此值时先原地转向并冻结轨迹计时，单位 rad。
+    heading_error_threshold: 0.8
+    # 位置反馈增益，单位 1/s，与样条速度前馈叠加。
+    kp_pos: 0.8
+    # 偏航误差反馈增益，单位 1/s。
+    kp_yaw: 1.5
+    # 机体 X 方向速度上限，单位 m/s；允许前进和后退。
+    max_vx: 2.5
+    # 机体 Y 方向速度上限，单位 m/s，允许横向移动。
+    max_vy: 0.35
+    # 偏航角速度上限，单位 rad/s；代码另设 1.0 rad/s 的上限。
+    max_vyaw: 1.0
+    # 局部终点及全局终点位置误差容差，单位 m。
+    finish_dist: 0.15
+    # 到达全局终点后，对齐最终朝向的偏航误差容差，单位 rad。
+    finish_yaw: 0.10
+    # 机身里程计时间戳或接收时刻超时后输出零速度，单位 s。
+    odom_timeout: 0.3

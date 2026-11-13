@@ -89,3 +89,14 @@ devel/
 # Linux
 .directory
 Thumbs.db
+
+# Deployment workspaces build artifacts and models
+**/build/
+**/install/
+**/log/
+**/deployment_policies/*.onnx
+**/deployment_policies/*.pt
+**/deployment_policies/*.pth
+!**/deployment_policies/.gitkeep
+map_all.pcd
+*.zip

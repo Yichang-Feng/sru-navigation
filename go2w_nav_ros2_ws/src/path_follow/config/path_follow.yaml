@@ -1,0 +1,38 @@
+path_follower:
+  ros__parameters:
+    # 仿真时钟通过启动参数 use_sim_time:=true 设置。
+    # local：跟随局部避障路径；global：直接跟随全局路径。修改后重启节点。
+    # 同时订阅两类路径，只有所选来源参与控制，失效时停车，不自动切换。
+    path_source: local
+    global_path_topic: /global_path
+    local_path_topic: /local_path
+    odom_topic: /lio/robo/odom
+    cmd_vel_topic: /cmd_vel
+    global_frame: map
+    local_frame: world
+    odom_frame: world
+
+    # 超时单位秒。全局路径通常仅发布一次，0 表示持续有效直至取消/替换。
+    control_frequency: 20.0
+    odom_timeout: 0.30
+    local_path_timeout: 0.50
+    global_path_timeout: 0.0
+    tf_timeout: 0.30
+    tf_jump_translation: 0.20
+    tf_jump_angle_degrees: 5.0
+
+    # 机体坐标速度：前进 x（m/s）、偏航 z（rad/s），不输出横移或倒车。
+    linear_vel: 0.30
+    max_linear_vel: 0.50
+    max_angular_vel: 1.0
+    # 前进加速度上限（m/s²）；安全/转弯/终点约束允许立即降速。
+    max_linear_accel: 0.50
+    max_angular_accel: 1.50
+    lookahead_distance: 0.50
+    angular_kp: 1.50
+    slow_down_angle: 0.60
+    rotate_in_place_angle: 0.80
+    goal_tolerance: 0.20
+    goal_height_tolerance: 0.40
+    max_tracking_error: 1.0
+    progress_search_distance: 3.0

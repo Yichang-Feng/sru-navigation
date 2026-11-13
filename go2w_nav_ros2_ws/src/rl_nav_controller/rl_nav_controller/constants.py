@@ -1,0 +1,90 @@
+"""Constants and configuration values for RL navigation controller."""
+
+# Control parameters
+DEFAULT_CONTROL_FREQUENCY = 5.0  # Hz
+DEFAULT_MIN_DEPTH = 0.25  # meters
+DEFAULT_MAX_DEPTH = 10.0  # meters
+ARRIVE_GOAL_THRESHOLD = 0.20  # meters (aligned with SEGMENT_ARRIVE_THRESHOLD = 0.20)
+NEAR_GOAL_THRESHOLD_MULTIPLIER = 2.0
+JOYSTICK_TIMEOUT = 15.0  # seconds
+
+# Depth camera parameters
+REALSENSE_DEPTH_TOPIC = '/camera/camera/depth/image_rect_raw'
+REALSENSE_DEPTH_TOPIC_ALIGNED = '/camera/camera/aligned_depth_to_color/image_raw'
+ZED_DEPTH_TOPIC = '/zed/zed_node/depth/depth_registered'
+DEFAULT_DEPTH_TOPIC = REALSENSE_DEPTH_TOPIC  # 默认使用 RealSense 原生深度图
+DEFAULT_MIN_DEPTH = 0.15  # meters (RealSense 盲区为 0.15m)
+
+# Model parameters
+POLICY_SCALE = [1.5, 1.0, 1.0]  # [linear_x, linear_y, angular_z]
+LATERAL_VELOCITY_SCALE = 0.6  # Additional scale for lateral movement
+
+# Filter coefficients
+LOW_PASS_FILTER_COEF = [0.9, 0.5, 0.5]  # [linear_x, linear_y, angular_z]
+
+# Joystick axis mappings
+JOYSTICK_AXIS_LINEAR_X = 1
+JOYSTICK_AXIS_LINEAR_Y = 0
+JOYSTICK_AXIS_LINEAR_Z = 3
+JOYSTICK_AXIS_ANGULAR_Z = 2
+JOYSTICK_AXIS_SMART = 5
+
+# Joystick button mappings
+# 按钮 A: 启动/恢复导航 (Start / Resume)
+BUTTON_START = 0
+# 按钮 B: 暂停/急停导航 (Pause / Stop)
+BUTTON_PAUSE = 1
+BUTTON_ABORT = 1
+BUTTON_TRIGGER_WAYPOINTS = 0
+
+BUTTON_RESET_HIDDEN_STATE = 2
+BUTTON_CLEAR_WAYPOINT = 4
+BUTTON_RECORD_WAYPOINT = 6
+BUTTON_SEND_GOAL = 10
+BUTTON_FORWARD = 11
+BUTTON_BACKWARD = 12
+BUTTON_LEFT = 13
+BUTTON_RIGHT = 14
+BUTTON_UP = 3
+BUTTON_DOWN = 0
+
+# Scales
+LINEAR_SCALE = 1.0
+ANGULAR_SCALE = 1.0
+MOVING_SCALE = 0.2
+SMART_JOYSTICK_SCALE = 5.0
+SMART_JOYSTICK_UPDATE_FREQUENCY = 5.0  # Hz
+SMART_JOYSTICK_Z_SCALE = 0.25  # Reduce Z movement
+SMART_JOYSTICK_FILTER_ALPHA = 0.2  # Low-pass filter coefficient
+
+# Timer intervals
+WAYPOINT_PUBLISH_INTERVAL = 0.2  # 5 Hz
+TARGET_VECTOR_PUBLISH_INTERVAL = 0.2  # 5 Hz
+TRIGGER_BUTTON_COOLDOWN = 1.0  # seconds
+
+# Visualization parameters
+TWIST_MARKER_SCALE = 5.0
+TWIST_MARKER_ID = 0
+
+# Navigation failure reporting & lookahead defaults
+REPORT_FAILURE = True
+LOOKAHEAD_DISTANCE = 2.0
+TARGET_VECTOR_MARKER_ID = 1
+MOVING_GOAL_MARKER_ID = 2
+WAYPOINTS_MARKER_ID = 3
+
+# Gravity constant
+GRAVITY = 9.81
+
+# Terminal Goal Arrival & Heading Alignment Defaults
+SEGMENT_ARRIVE_THRESHOLD = 0.20  # meters (realistic arrival radius for quadruped)
+DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN = True
+DEFAULT_TERMINAL_HEADING_TOL = 0.26  # ~15 degrees in radians
+DEFAULT_TERMINAL_HEADING_KP = 1.2
+DEFAULT_TERMINAL_HEADING_DEADBAND = 0.12  # rad/s to overcome static ground friction
+DEFAULT_TERMINAL_HEADING_MIN_VEL = 0.15   # rad/s
+DEFAULT_TERMINAL_HEADING_MAX_VEL = 0.45   # rad/s for smooth, non-jerky rotation
+DEFAULT_TERMINAL_HEADING_TIMEOUT = 5.0   # seconds
+DEFAULT_TERMINAL_HEADING_DRIFT_TOL = 0.40 # meters (position drift guard during in-place turning)
+DEFAULT_TERMINAL_HEADING_STABLE_FRAMES = 2 # frames
+

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rviz_multi_goals_manager_plugins</name>
+  <version>0.1.0</version>
+  <description>RViz2 panel plugin for multi-goal navigation management</description>
+  <maintainer email="user@example.com">User</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>action_msgs</depend>
+  <depend>rviz2</depend>
+  <depend>rviz_common</depend>
+  <depend>pluginlib</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>ament_index_cpp</depend>
+
+  <!-- rover_msgs 为可选自定义消息包 -->
+  <!-- <depend>rover_msgs</depend> -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

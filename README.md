@@ -1,317 +1,123 @@
-# Robot Deployment - SRU Navigation on Unitree B2W
+# sru-robot-deployment — 实机部署工程中心
 
-[![Paper](https://img.shields.io/badge/IJRR-2025-blue)](https://journals.sagepub.com/home/ijr)
-[![Website](https://img.shields.io/badge/Project-Website-green)](https://michaelfyang.github.io/sru-project-website/)
-[![ROS2](https://img.shields.io/badge/ROS2-Jazzy-blue)](https://docs.ros.org/en/jazzy/index.html)
+> **本目录定位**：存放所有在 Unitree Go2W 真实机器人（双 Jetson 架构）上运行的 ROS 2 工作空间、驱动、节点、配置与启动脚本。  
+> **机载对应目标**：背部高层主脑（NVIDIA Jetson Orin DevKit，IP: `192.168.123.111` / `10.3.42.161`，用户: `agile`）。  
+> **前置必读**：请先阅读 [GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) 了解硬件接线、网络拓扑与两机通信。
 
-> **📌 Important Note**: This repository is the **integrated deployment system** for the Unitree B2W quadrupedal robot with learning-based navigation and locomotion control. It combines the low-level simulation environment, high-level navigation controller, and teleoperation interface for autonomous navigation research and real robot deployment.
+---
 
-## Overview
+## 一、目录结构与机载路径完全对照表
 
-This project provides a complete stack for quadrupedal robot navigation with **two alternative control modes**:
-
-1. **[b2w_sim](b2w_sim/)** - Gazebo simulation with neural network locomotion control (50 Hz inference, 200 Hz output)
-2. **[rl_nav_controller](rl_nav_controller/)** - Autonomous navigation using trained SRU network (5 Hz) **OR**
-3. **[b2w_joystick_control](b2w_sim/b2w_joystick_control/)** - Manual teleoperation interface (10 Hz)
-
-**Control Modes:** Choose either autonomous navigation with the RL controller OR manual control with joystick - only one runs at a time. Both send velocity commands to the same low-level locomotion controller.
-
-> **🎮 Joystick Required:** A joystick (e.g., PS5 controller) is required for **both** control modes. In autonomous navigation mode, the joystick serves as a safety deadman switch. In manual teleoperation mode, it provides direct control. The robot will not move without a connected joystick.
-
-The `rl_nav_controller` package loads and deploys the trained **Spatially-enhanced Recurrent Unit (SRU)** neural network, enabling vision-based autonomous navigation to goal positions. See the [SRU project website](https://michaelfyang.github.io/sru-project-website/) for more details.
-
-### System Architecture
+本目录完整集成了机器狗机载的**两大 ROS 2 工作空间**（`go2w_nav_ros2_ws` 与 `bridge_ws`）以及配套脚本与文档：
 
 ```
-┌──────────────────────────┐     ┌──────────────────────────┐
-│  RL Navigation (5 Hz)    │     │  Joystick Control (10 Hz)│
-│  Depth + Goal → Velocity │     │   Joy Input → Velocity   │
-└──────────┬───────────────┘     └──────────┬───────────────┘
-           │                                │
-           └────────────┬───────────────────┘
-                        │ Either/Or
-           /path_manager/path_manager_ros/nav_vel (Twist)
-                        │
-                        ↓
-┌─────────────────────────────────────────────────────────────┐
-│              B2W Simulation / Real Robot                    │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │   Low-level Locomotion Controller (ONNX/C++)        │   │
-│  │   - Joint state feedback (50 Hz inference)          │   │
-│  │   - 16 joint action outputs (200 Hz publish)        │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+sru-robot-deployment/
+│
+├── go2w_nav_ros2_ws/              ← 🚀 对应狗机机载 ~/go2w_nav_ros2_ws/ (高层导航栈)
+│   ├── src/
+│   │   ├── rl_nav_controller/     ← 核心 SRU 局部强化学习避障与前瞻跟踪节点
+│   │   │   ├── rl_nav_controller/
+│   │   │   │   ├── rl_nav_controller.py          (标准主控节点)
+│   │   │   │   ├── rl_nav_controller_adaptive.py (自适应前瞻变体)
+│   │   │   │   ├── rl_nav_controller_stairs.py   (楼梯穿越变体)
+│   │   │   │   ├── adaptive_path_tracker.py      (自适应前瞻胡萝卜点算法)
+│   │   │   │   ├── path_tracker.py               (分段路径跟踪器)
+│   │   │   │   ├── stairs_depth_processor.py     (台阶高程提取处理器)
+│   │   │   │   └── constants.py                  (遥控器手柄与状态常量)
+│   │   │   ├── launch/                           (启动 launch 文件)
+│   │   │   ├── config/                           (ZED / RealSense 参数覆盖)
+│   │   │   ├── deployment_policies/              (ONNX 模型目录, 模型文件从训练导出)
+│   │   │   └── setup.py
+│   │   ├── global_planner/        ← 全局路径规划功能包 (Dijkstra / A* on 栅格地图)
+│   │   ├── local_planner/         ← 局部规划器功能包
+│   │   ├── path_follow/           ← 路径跟随与动态胡萝卜点提取节点
+│   │   ├── go2w_bridge/           ← 底盘通信与手柄控制接口包
+│   │   └── super_lio/             ← LiDAR 里程计与重定位配置包
+│   ├── start_nav.sh               ← 导航一键启动脚本
+│   ├── stop_nav.sh                ← 导航停止脚本
+│   ├── rviz.rviz                  ← 导航监控 RViz 视角配置
+│   └── test.rviz
+│
+├── bridge_ws/                     ← 🔌 对应狗机机载 ~/bridge_ws/ (底盘通信与传感器驱动)
+│   ├── src/
+│   │   ├── unitree_bridge/        ← 宇树官方 C++ 底盘桥接节点 (/cmd_vel → 宇树 DDS)
+│   │   ├── livox_ros_driver2/     ← Livox MID-360 激光雷达 ROS 2 驱动
+│   │   ├── zed-ros2-wrapper/      ← Stereolabs ZED 2i 双目深度相机 ROS 2 驱动
+│   │   ├── super_lio/             ← Super LIO 激光惯导里程计与重定位功能包 (含 map.pcd)
+│   │   ├── rviz_multi_goals_manager_plugins/
+│   │   ├── nmea_msgs/             ← GPS / 惯导消息定义
+│   │   ├── basic/                 ← 基础工具包
+│   │   └── rl_nav_controller/     ← 备份引用节点
+│   ├── bridge.sh                  ← 底盘桥单键启动
+│   ├── bridge.yaml                ← 底盘参数配置
+│   ├── lio.sh                     ← 雷达定位启动
+│   ├── start.sh                   ← 策略启动
+│   ├── complex.sh                 ← colcon 一键编译
+│   └── zed_nav_override.yaml      ← 相机覆盖参数
+│
+├── scripts/                       ← 🛠️ 远程一键部署/同步/控制脚本
+│   ├── sync_to_go2w_nav.sh        ← 一键将本地修改推送到机载 ~/go2w_nav_ros2_ws/
+│   ├── sync_adaptive_to_go2w.sh   ← 推送自适应变体至机器狗
+│   ├── sync_stairs_to_go2w.sh     ← 推送楼梯变体至机器狗
+│   ├── sync_to_robot.sh           ← 底层一键同步脚本
+│   ├── start_nav.sh               ← 本地备用启动脚本
+│   ├── start_nav_custom.sh        ← 自定义前瞻距离启动脚本
+│   ├── start_nav_adaptive.sh      ← 自适应前瞻启动脚本
+│   ├── start_nav_stairs.sh        ← 楼梯场景启动脚本
+│   └── stop_local_sru.sh          ← 停止脚本
+│
+├── docs/                          ← 📖 实机部署技术与交接文档
+│   ├── GO2W_ROBOT_DEPLOYMENT_HANDOVER.md        (🔑 硬件拓扑与开机排坑手册)
+│   ├── GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md        (完整纯命令行执行指南)
+│   ├── GO2W_NAVIGATION_SYSTEM_GUIDE.md          (局部 SRU 导航系统详解)
+│   ├── GLOBAL_NAV_INTEGRATION_SPEC.md           (全局规划 + SRU 联合导航规范)
+│   ├── GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md (两种导航模式架构对比)
+│   ├── GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md(终点朝向控制交接)
+│   ├── GO2W_DOOR_NAVIGATION_HANDOVER.md         (窄门通过与前瞻自适应)
+│   ├── GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md (相机深度图参数调校)
+│   └── GO2W_SIM_HANDOFF.md                      (仿真接入工程交接)
+│
+├── diagnostics/                   ← 🩺 诊断与实机记录工具
+│   ├── door_diagnostic_logger.py  (窄门通过热力图与特征诊断记录工具)
+│   ├── test_door_diagnostic_logger.py
+│   └── test_realsense_max_distance.py
+│
+└── config/                        ← 配置文件 (rviz.rviz 等)
 ```
 
-## Quick Start
+---
 
-### Installation
+## 二、两大工作空间的职责分工
+
+| 工作空间 | 机载路径 | 主要节点与职责 | 启动命令 |
+|:---|:---|:---|:---|
+| **`bridge_ws`** | `agile@111:~/bridge_ws` | **硬件驱动与底层中枢**：<br>1. `unitree_bridge`：监听 `/cmd_vel` 转换下发 DDS 给底盘。<br>2. `livox_ros_driver2`：发布雷达点云。<br>3. `zed_wrapper`：发布深度图与相机里程计。<br>4. `super_lio`：雷达全局重定位。 | `cd ~/bridge_ws && ./bridge.sh`<br>`ros2 launch super_lio relocation.py` |
+| **`go2w_nav_ros2_ws`** | `agile@111:~/go2w_nav_ros2_ws` | **高层自主避障与导航栈**：<br>1. `rl_nav_controller`：运行 SRU ONNX 模型进行端到端局部避障。<br>2. `global_planner`：基于雷达先验地图生成全局全局路径 `/path`。<br>3. `path_follow`：计算路径前瞻萝卜点并送入强化学习策略。 | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh` |
+
+---
+
+## 三、一键推送代码到机器狗
+
+在开发机上执行以下命令，将本地修改一键同步到机载：
 
 ```bash
-# Clone repository
-git clone <repo-url> ~/sru_ws/src/sru-robot-deployment
-cd ~/sru_ws/src/sru-robot-deployment
+# 1. 确保连入机器狗网络（如 WiFi: Agile-Robot-Guest）
+# 2. 推送导航工作空间代码：
+bash sru-robot-deployment/scripts/sync_to_go2w_nav.sh 10.3.42.161
 
-# Option 1: Use setup script (recommended - auto-detects GPU)
-./setup_ros2_onnx.sh
-
-# Option 2: Manual installation
-pip install numpy scipy opencv-python onnxruntime  # or onnxruntime-gpu for CUDA
-
-# Build
-cd ~/sru_ws
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.bash
+# 3. 推送训练好的最新 ONNX 模型权重：
+scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
+    agile@10.3.42.161:~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/
 ```
 
-### Simulation
-
-**Choose one control mode:**
-
-**Option A: Autonomous navigation with RL controller (5 Hz)**
-
-```bash
-# Terminal 1: Launch full B2W simulation with controller
-ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py enable_rviz:=true
-
-# Terminal 2: Launch navigation controller (loads SRU network via ONNX Runtime)
-ros2 launch rl_nav_controller rl_nav_controller.launch.py sim:=true
-```
-
-**Option B: Direct joystick teleoperation (10 Hz)**
-
-```bash
-# Terminal 1: Launch full B2W simulation with controller
-ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py enable_rviz:=true
-
-# Terminal 2: Launch joystick control (instead of navigation controller)
-ros2 launch b2w_joystick_control joystick_teleop.launch.py
-```
-
-### Real Robot Deployment
-
-**Prerequisites:**
-```bash
-# Install Python dependencies
-pip install numpy scipy opencv-python onnxruntime  # or onnxruntime-gpu for CUDA
-```
-
-**Choose one control mode:**
-
-**Option A: Autonomous navigation with RL controller (5 Hz)**
-
-```bash
-# Terminal 1: Launch real robot (requires hardware setup)
-ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py  # Adjust for real hardware
-
-# Terminal 2: Launch navigation controller
-ros2 launch rl_nav_controller rl_nav_controller.launch.py
-
-# Terminal 3: Send navigation goal (choose one method)
-
-# Method 1: Click in RViz to set goal
-# In RViz, use the "Publish Point" tool to click on the map where you want the robot to navigate
-# Make sure the topic is set to /goal_pose
-
-# Method 2: Command line
-ros2 topic pub /goal_pose geometry_msgs/PoseStamped "{
-  header: {frame_id: 'odom'},
-  pose: {position: {x: 5.0, y: 2.0, z: 0.0}}
-}"
-```
-
-**Option B: Direct joystick teleoperation (10 Hz)**
-
-```bash
-# Terminal 1: Launch real robot (requires hardware setup)
-ros2 launch b2w_gazebo_ros2 b2w_gazebo.launch.py  # Adjust for real hardware
-
-# Terminal 2: Launch joystick control (instead of navigation controller)
-ros2 launch b2w_joystick_control joystick_teleop.launch.py
-```
-
-## Module Details
-
-### B2W Simulation ([b2w_sim/](b2w_sim/))
-
-Gazebo simulation environment with ONNX-based neural network locomotion controller for the Unitree B2W quadrupedal robot. Includes robot URDF models, ROS-Gazebo bridge configuration, and RViz2 visualization.
-
-**Main launch file:** `b2w_gazebo.launch.py` - Full simulation stack with controller and RViz
-
-See [b2w_sim/README.md](b2w_sim/README.md) for detailed documentation.
-
-### Navigation Controller ([rl_nav_controller/](rl_nav_controller/))
-
-Deployment of the trained SRU network for autonomous goal-directed navigation:
-
-- **Loads trained SRU policy** with VAE depth preprocessing for vision-based navigation
-- **Multi-modal control**: autonomous goal navigation, smart joystick, waypoint playback
-- **Real-time inference** at 5 Hz with depth perception
-- **RViz2 visualization** for debugging and monitoring
-
-This package deploys the trained **Spatially-enhanced Recurrent Unit (SRU)** neural network, enabling the robot to autonomously navigate to goal positions using depth camera input.
-
-**Launch modes:**
-- `sim:=true` - Simulation mode
-- `launch_zed:=true` - Enable ZedX camera integration
-
-See [rl_nav_controller/README.md](rl_nav_controller/README.md) for detailed documentation.
-
-### Joystick Control ([b2w_joystick_control/](b2w_sim/b2w_joystick_control/))
-
-PS5 controller teleoperation interface:
-
-- **Safety enable button** (L1 deadman switch)
-- **Turbo mode** (R1) for increased speed
-- **Configurable button/axis mappings**
-
-See [b2w_joystick_control/README.md](b2w_sim/b2w_joystick_control/README.md) for detailed documentation.
-
-## Control Hierarchy
-
-| Level | Component | Frequency | Input | Output |
-|-------|-----------|-----------|-------|--------|
-| **High (either)** | Navigation Controller | 5 Hz | Depth + Goal pose | Velocity commands |
-| **High (either)** | Joystick Control | 10 Hz | Joy input | Velocity commands |
-| **Low** | Locomotion Controller | 50-200 Hz | Velocity commands | 16 joint actions |
-
-**Note:** Navigation Controller and Joystick Control are alternative input sources - only one runs at a time. Both send velocity commands to the same topic that the Locomotion Controller subscribes to.
-
-## Setting Navigation Goals
-
-### Using RViz to Click Goals
-
-1. In RViz, locate the "2D Goal Pose" tool in the toolbar (or press 'G')
-2. Configure the tool to publish to `/goal_pose` topic with `PoseStamped` message type
-3. Click on the map where you want the robot to navigate
-4. The robot will autonomously navigate to the clicked location
-
-### Using Command Line
-
-```bash
-ros2 topic pub /goal_pose geometry_msgs/PoseStamped "{
-  header: {frame_id: 'odom'},
-  pose: {position: {x: 5.0, y: 2.0, z: 0.0}}
-}"
-```
-
-## Key Topics & Services
-
-**Main command topics:**
-- `/goal_pose` (geometry_msgs/PoseStamped) - Navigation goal input (RViz or command line)
-- `/path_manager/path_manager_ros/nav_vel` (geometry_msgs/Twist) - Navigation output
-- `/nav_vel` (geometry_msgs/Twist) - Alternative navigation topic
-- `/joy` (sensor_msgs/Joy) - Joystick input
-
-**Simulation-specific:**
-- `/clock` - Gazebo simulation time
-- `/joint_states` - Robot joint feedback
-- `/dlio/odom_node/odom` - Odometry
-
-**Sensors:**
-- `/zed/zed_node/depth/depth_registered` - Depth camera input
-- `/collision_plate/force_torque` - Force/torque feedback
-
-See individual module READMEs for complete topic lists.
-
-## Configuration & Customization
-
-### Locomotion Policy
-
-Edit [b2w_controllers/config/b2w_controllers.yaml](b2w_sim/b2w_controllers/config/b2w_controllers.yaml):
-```yaml
-policy:
-  relative_path: policy/policy_force_new.onnx
-environment_profile: default  # or 'crouched'
-```
-
-### Navigation Parameters
-
-Edit [rl_nav_controller/constants.py](rl_nav_controller/rl_nav_controller/constants.py):
-```python
-DEFAULT_CONTROL_FREQUENCY = 5.0        # Hz
-ARRIVE_GOAL_THRESHOLD = 0.75           # meters
-SMART_JOYSTICK_SCALE = 5.0             # meters
-```
-
-### Joystick Mappings
-
-Edit [b2w_joystick_control/config/ps5_config.yaml](b2w_sim/b2w_joystick_control/config/ps5_config.yaml) for custom controller layouts.
-
-## Development
-
-### Adding Features
-
-**For locomotion (low-level):**
-- Modify [b2w_controllers/src/b2w_controllers.cpp](b2w_sim/b2w_controllers/src/b2w_controllers.cpp)
-- Update ONNX policy path in configuration
-- Rebuild: `colcon build --packages-select b2w_controllers`
-
-**For navigation (high-level):**
-- Modify [rl_nav_controller/rl_nav_controller.py](rl_nav_controller/rl_nav_controller/rl_nav_controller.py)
-- Update control modes in [utils.py](rl_nav_controller/rl_nav_controller/utils.py)
-- Rebuild: `colcon build --packages-select rl_nav_controller` (without --symlink-install for venv compatibility)
-
-**For Gazebo bridges:**
-- Edit [b2w_gazebo_ros2/config/b2w_gz_bridge.yaml](b2w_sim/b2w_gazebo_ros2/config/b2w_gz_bridge.yaml)
-- No rebuild needed with `--symlink-install`
-
-## Troubleshooting
-
-**Simulation time not synchronized:**
-- Ensure `/clock` topic is bridged in b2w_gz_bridge.yaml
-- All nodes must have `use_sim_time: true`
-
-**Navigation policy runs slowly:**
-- Verify GPU: `python -c "import onnxruntime as ort; print(ort.get_available_providers())"`
-- Check depth input rate: `ros2 topic hz /zed/zed_node/depth/depth_registered`
-
-**Robot doesn't move:**
-- Check joystick enables (L1 button in PS5 controller)
-- Verify `/nav_vel` or `/path_manager/path_manager_ros/nav_vel` topics
-- Check joint command topics in b2w_gz_bridge.yaml
-
-**ONNX Runtime errors:**
-- Do not install system ONNX Runtime—library is bundled in `b2w_controllers/third_party/`
-
-See individual module READMEs for more troubleshooting guidance.
-
-## Related Repositories
-
-- [sru-pytorch-spatial-learning](https://github.com/michaelfyang/sru-pytorch-spatial-learning) - Core SRU architecture
-- [sru-depth-pretraining](https://github.com/michaelfyang/sru-depth-pretraining) - Depth perception pretraining
-- [SRU Project Website](https://michaelfyang.github.io/sru-project-website/) - Complete system overview
-
-## Requirements
-
-- **ROS 2 Jazzy** (or compatible)
-- **Gazebo Harmonic** (simulation only)
-- **Python 3.10+** with ONNX Runtime
-- **ZedX Camera** (hardware deployment only)
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file in each package for details.
-
-## Citation
-
-If you use this system in your research, please cite:
-
-```bibtex
-@article{yang2025sru,
-  author = {Yang, Fan and Frivik, Per and Hoeller, David and Wang, Chen and Cadena, Cesar and Hutter, Marco},
-  title = {Spatially-enhanced recurrent memory for long-range mapless navigation via end-to-end reinforcement learning},
-  journal = {The International Journal of Robotics Research},
-  year = {2025},
-  doi = {10.1177/02783649251401926},
-  url = {https://doi.org/10.1177/02783649251401926}
-}
-```
-
-## Contact
-
-**Authors:**
-- Fan Yang (fanyang1@ethz.ch)
-- Per Frivik (pfrivik@ethz.ch)
-
-**Affiliation:** Robotic Systems Lab, ETH Zurich
+---
+
+## 四、部署文档导航
+
+| 领域 | 核心文档 |
+|:---|:---|
+| **开机与通信** | [GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) |
+| **命令行操作** | [GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md) |
+| **架构与联合模式** | [GLOBAL_NAV_INTEGRATION_SPEC.md](docs/GLOBAL_NAV_INTEGRATION_SPEC.md)<br>[GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md](docs/GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md) |
+| **相机调优** | [GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) |
+| **场景适配** | [GO2W_DOOR_NAVIGATION_HANDOVER.md](docs/GO2W_DOOR_NAVIGATION_HANDOVER.md)<br>[GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md](docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md) |

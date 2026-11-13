@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>unitree_bridge</name>
+  <version>0.0.1</version>
+  <description>Bridge ROS2 cmd_vel to Unitree sport request</description>
+  <maintainer email="you@example.com">yourname</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>unitree_api</depend>
+  <depend>unitree_go</depend>
+  <depend>unitree_hg</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
