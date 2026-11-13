@@ -1,9 +1,18 @@
 """RL Navigation Controller - Main module for autonomous robot navigation using ONNX Runtime."""
 
 import os
+import sys
 import time
 import json
 import argparse
+
+# Ensure package root (.../src/rl_nav_controller) is in sys.path and remove inner module dir to avoid package shadowing
+_cur_dir = os.path.dirname(os.path.abspath(__file__))
+_pkg_root = os.path.dirname(_cur_dir)
+if _pkg_root not in sys.path:
+    sys.path.insert(0, _pkg_root)
+if _cur_dir in sys.path:
+    sys.path.remove(_cur_dir)
 
 import numpy as np
 import onnxruntime as ort
@@ -377,6 +386,7 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('passage_latch_dist', 1.2)
         self.declare_parameter('door_speed_boost', 0.35)
         self.declare_parameter('segment_arrive_threshold', getattr(constants, 'SEGMENT_ARRIVE_THRESHOLD', 0.20))
+        self.declare_parameter('arrive_goal_threshold', getattr(constants, 'ARRIVE_GOAL_THRESHOLD', 0.20))
         self.declare_parameter('blocked_timeout', getattr(constants, 'BLOCKED_TIMEOUT', 4.0))
         self.declare_parameter('blocked_dist_threshold', getattr(constants, 'BLOCKED_DIST_THRESHOLD', 0.1))
         self.declare_parameter('blocked_vel_threshold', getattr(constants, 'BLOCKED_VEL_THRESHOLD', 0.1))
@@ -386,6 +396,9 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('goal_reached_timeout', getattr(constants, 'DEFAULT_GOAL_REACHED_TIMEOUT', 1.0))
         self.declare_parameter('report_failure', getattr(constants, 'REPORT_FAILURE', True))
         self.declare_parameter('path_frame_id', '')
+        self.declare_parameter('depth_topic', getattr(constants, 'DEFAULT_DEPTH_TOPIC', '/camera/camera/depth/image_rect_raw'))
+        self.declare_parameter('min_depth', float(getattr(constants, 'DEFAULT_MIN_DEPTH', min_depth)))
+        self.declare_parameter('max_depth', float(getattr(constants, 'DEFAULT_MAX_DEPTH', max_depth)))
 
         # Terminal heading alignment parameters
         self.declare_parameter('enable_terminal_heading_align', getattr(constants, 'DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN', True))
@@ -421,6 +434,7 @@ class NavigationPolicyNode(Node):
         self.door_speed_boost = float(self.get_parameter('door_speed_boost').value)
         self.report_failure = bool(self.get_parameter('report_failure').value)
         self.segment_arrive_threshold = float(self.get_parameter('segment_arrive_threshold').value)
+        self.arrive_goal_threshold = float(self.get_parameter('arrive_goal_threshold').value)
         self.blocked_timeout = float(self.get_parameter('blocked_timeout').value)
         self.blocked_dist_threshold = float(self.get_parameter('blocked_dist_threshold').value)
         self.blocked_vel_threshold = float(self.get_parameter('blocked_vel_threshold').value)
@@ -429,6 +443,9 @@ class NavigationPolicyNode(Node):
         self.camera_timeout = float(self.get_parameter('camera_timeout').value)
         self.goal_reached_timeout = float(self.get_parameter('goal_reached_timeout').value)
         self.configured_path_frame_id = str(self.get_parameter('path_frame_id').value).strip()
+        self.depth_topic = str(self.get_parameter('depth_topic').value).strip()
+        self.min_depth = float(self.get_parameter('min_depth').value)
+        self.max_depth = float(self.get_parameter('max_depth').value)
 
         self.enable_terminal_heading_align = bool(self.get_parameter('enable_terminal_heading_align').value)
         self.terminal_heading_tol = float(self.get_parameter('terminal_heading_tol').value)
@@ -510,7 +527,7 @@ class NavigationPolicyNode(Node):
         else:
             self.loc_odom_subscriber = None
         self.depth_subscriber = self.create_subscription(
-            Image, '/zed/zed_node/depth/depth_registered', self.depth_callback, 10
+            Image, self.depth_topic, self.depth_callback, 10
         )
         self.joy_subscriber = self.create_subscription(
             Joy, '/rsl_joy', self.joy_callback, 10
@@ -531,6 +548,9 @@ class NavigationPolicyNode(Node):
         )
         self.stop_subscriber = self.create_subscription(
             String, self.stop_topic, self.mission_control_callback, 10
+        )
+        self.motion_enable_subscriber = self.create_subscription(
+            Bool, self.motion_enable_topic, self.motion_enable_callback, motion_enable_qos
         )
 
         # Utilities
@@ -704,6 +724,9 @@ class NavigationPolicyNode(Node):
         # 8) Mark that odom is now available and auto unlock bridge
         if not self.odom_ready:
             self.odom_ready = True
+            self.get_logger().info(
+                '\033[92m' + f'[✓] Odometry ready on {self.odom_topic} (frame: {self.map_frame_id}). Starting depth processing.' + '\033[0m'
+            )
             if self.auto_unlock_bridge and not self.chassis_unlocked:
                 self.unlock_chassis()
 
@@ -786,6 +809,68 @@ class NavigationPolicyNode(Node):
             except Exception:
                 pass
 
+    def _has_active_path(self) -> bool:
+        """Safely check if an active path is available."""
+        if not hasattr(self, 'path_tracker') or self.path_tracker is None:
+            return False
+        if hasattr(self.path_tracker, 'has_path'):
+            return bool(self.path_tracker.has_path())
+        if hasattr(self.path_tracker, 'is_active'):
+            return bool(self.path_tracker.is_active())
+        return False
+
+    def motion_enable_callback(self, msg: Bool):
+        """Handle chassis motion enable/disable events from /motion_enabled.
+
+        Triggered when:
+        1. Unitree wireless remote controller button B is pressed -> msg.data = False (stop/pause)
+        2. Unitree wireless remote controller button A is pressed -> msg.data = True (start/resume)
+        3. External safety monitor or bridge toggles motion enable.
+        """
+        enabled = bool(msg.data)
+
+        if not enabled:
+            # Motion disabled (e.g. Unitree controller button B pressed): Transition to STOPPED
+            if self.state in (NavState.RUNNING, NavState.IDLE, NavState.FAILED):
+                self.is_abort_goal = False
+                self.set_state(NavState.STOPPED, reason="Chassis motion disabled by remote B button (/motion_enabled=False)")
+                self._stop_robot()
+                if hasattr(self, 'blocked_detector') and self._has_active_path():
+                    self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+                self.get_logger().warn(
+                    '\033[93m[MotionGate] Chassis motion disabled: State set to STOPPED (cmd_vel=0, path retained in memory).\033[0m'
+                )
+        else:
+            # Motion enabled (e.g. Unitree controller button A pressed): If currently in STOPPED state and a valid path exists, resume RUNNING
+            if self.state == NavState.STOPPED:
+                if self._has_active_path():
+                    self.is_abort_goal = False
+                    self.goal_reached_latched = False
+                    tracking_frame = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
+                    pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
+                    pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+                    if pos_check is not None and hasattr(self.path_tracker, 'realign_to_robot'):
+                        self.path_tracker.realign_to_robot(pos_check[:2])
+                    if hasattr(self, 'blocked_detector'):
+                        self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+                    self.set_state(NavState.RUNNING, reason="Chassis motion resumed by remote A button (/motion_enabled=True)")
+                    self.get_logger().info(
+                        '\033[92m[MotionGate] Chassis motion enabled: Resumed path tracking -> RUNNING!\033[0m'
+                    )
+                elif self.target_pos_w is not None or self.last_target_pos is not None:
+                    if self.target_pos_w is None and self.last_target_pos is not None:
+                        self.target_pos_w = list(self.last_target_pos)
+                    self.is_abort_goal = False
+                    self.goal_reached_latched = False
+                    if hasattr(self, 'blocked_detector'):
+                        self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
+                    self.set_state(NavState.RUNNING, reason="Chassis motion resumed by remote A button (Single Goal) (/motion_enabled=True)")
+                    self.get_logger().info(
+                        f'\033[92m[MotionGate] Chassis motion enabled: Resumed single goal navigation to [{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}]!\033[0m'
+                    )
+                else:
+                    self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path or goal -> IDLE")
+
     def set_state(self, new_state: NavState, reason: str = "", error_msg: str = ""):
         """Transition navigation state and trigger immediate event-driven status dispatch."""
         if self.state != new_state or (new_state == NavState.ERROR and error_msg != self.error_msg):
@@ -820,21 +905,22 @@ class NavigationPolicyNode(Node):
                 elapsed = now - self.last_depth_time
 
             if elapsed > self.camera_timeout:
+                cam_name = "RealSense" if ("camera" in self.depth_topic or "realsense" in self.depth_topic) else "ZED"
                 if self.report_failure:
                     self._stop_robot()
                     self.set_state(
                         NavState.ERROR,
-                        reason=f"ZED camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
+                        reason=f"{cam_name} camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
                         error_msg="zed_camera_lost"
                     )
                     self.get_logger().error(
                         '\033[91m' +
-                        f'[Safety Watchdog] ZED camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
+                        f'[Safety Watchdog] {cam_name} camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
                         '\033[0m'
                     )
                 else:
                     self.get_logger().warn(
-                        f'[Safety Watchdog] ZED camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
+                        f'[Safety Watchdog] {cam_name} camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
                         throttle_duration_sec=3.0
                     )
 
@@ -1180,25 +1266,36 @@ class NavigationPolicyNode(Node):
         # Update timestamp of last received depth frame
         self.last_depth_time = time.time()
 
-        # If previously halted due to ZED camera loss, auto-recover if path is active
-        if self.state == NavState.ERROR and self.error_msg == "zed_camera_lost":
+        # If previously halted due to camera loss, auto-recover if path is active
+        if self.state == NavState.ERROR and self.error_msg in ("zed_camera_lost", "camera_lost"):
             if self.path_tracker.is_active():
                 self.get_logger().info(
                     '\033[92m' +
-                    '[Safety Watchdog] ZED camera depth frames recovered! Resuming path tracking -> RUNNING.' +
+                    '[Safety Watchdog] Camera depth frames recovered! Resuming path tracking -> RUNNING.' +
                     '\033[0m'
                 )
                 self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
-                self.set_state(NavState.RUNNING, reason="ZED camera resumed")
+                self.set_state(NavState.RUNNING, reason="Camera depth resumed")
 
         # 1) Don't proceed until odometry has come in at least once
         if not self.odom_ready:
-            self.get_logger().warn('\033[93m' + 'Odometry not ready, skipping depth callback.' + '\033[0m')
+            self.get_logger().warn(
+                '\033[93m' + f'Waiting for odometry on {self.odom_topic} (Super LIO / relocation initializing)... (skipping depth callback)' + '\033[0m',
+                throttle_duration_sec=3.0
+            )
             return
 
         # 2) Convert ROS Image → cv2 / NumPy, clamp NaNs / Infs / min/max
         try:
             depth_array = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+
+            # Auto-convert encoding:
+            # - RealSense (D435/D435i/D455) outputs 16UC1 / mono16 (integer millimeters)
+            # - ZED (2i/X) outputs 32FC1 (float meters)
+            if getattr(depth_msg, 'encoding', '') in ('16UC1', 'mono16'):
+                depth_array = depth_array.astype(np.float32) / 1000.0
+            elif getattr(depth_msg, 'encoding', '') in ('32FC1',):
+                depth_array = depth_array.astype(np.float32)
 
             # Fix near-wall vs far-distance 0.0 ambiguity:
             # 1. Distinguish between far distance (> max_depth or +inf) and close proximity / blindzone (< min_depth or nan/-inf)
@@ -1252,7 +1349,7 @@ class NavigationPolicyNode(Node):
             self.is_aligning_heading = False
             # If in STOPPED state and path is present, keep blocked_detector window refreshed
             # so pausing does not accumulate stale stationary time into stall timeout
-            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and self._has_active_path():
                 self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
             return
 
@@ -1552,7 +1649,7 @@ class NavigationPolicyNode(Node):
             if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker'):
                 self.blocked_detector.reset(
                     self.robot_odom_time,
-                    self.path_tracker.current_progress if self.path_tracker.has_path() else 0.0
+                    self.path_tracker.current_progress if self._has_active_path() else 0.0
                 )
             self.get_logger().warn(
                 '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0, path retained).\033[0m'
@@ -1574,12 +1671,12 @@ class NavigationPolicyNode(Node):
             self.goal_reached_latched = False
             self.unlock_chassis()
 
-            if self.path_tracker.has_path():
+            if self._has_active_path():
                 # Realign path tracker to current robot pose before resuming
                 tracking_frame = getattr(self.path_tracker, 'frame_id', 'map')
                 pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame)
                 pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
-                if pos_check is not None:
+                if pos_check is not None and hasattr(self.path_tracker, 'realign_to_robot'):
                     self.path_tracker.realign_to_robot(pos_check[:2])
 
                 # Reset blocked detector so resuming has a clean 4.0s stall detection window
@@ -2010,7 +2107,7 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--sim', action='store_true', help='run in simulation mode')
     parser.add_argument('--policy-path', type=str, default=None, help='Path to custom nav_policy.onnx')
-    parser.add_argument('--arrive-threshold', type=float, default=0.45, help='Goal arrival distance threshold in meters (default: 0.45)')
+    parser.add_argument('--arrive-threshold', type=float, default=None, help='Goal arrival distance threshold in meters (default: 0.20)')
     parser.add_argument('--path-topic', type=str, default=None, help='Global path topic name (default: /global_path)')
     parser.add_argument('--stop-topic', type=str, default=None, help='Mission control topic name (default: /mission/control)')
     parser.add_argument('--control-topic', type=str, default=None, help='Mission control topic alias (default: /mission/control)')
@@ -2037,9 +2134,16 @@ def main(args=None):
     use_sim = known_args.sim
 
     pkg_name = 'rl_nav_controller'
-    pkg_path = get_package_share_directory(pkg_name)
+    try:
+        pkg_path = get_package_share_directory(pkg_name)
+    except Exception:
+        pkg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
     preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_encoder.onnx')
-    
+    if not os.path.isfile(preprocess_model_path):
+        pkg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_encoder.onnx')
+
     if known_args.policy_path:
         policy_model_path = os.path.expanduser(known_args.policy_path)
     else:
@@ -2108,8 +2212,13 @@ def main(args=None):
 
     try:
         rclpy.spin(navigation_policy_node)
-    except (KeyboardInterrupt, Exception):
+    except KeyboardInterrupt:
         pass
+    except Exception as e:
+        import traceback
+        navigation_policy_node.get_logger().fatal(
+            f"Fatal unhandled exception in spin(): {e}\n{traceback.format_exc()}"
+        )
     finally:
         try:
             navigation_policy_node.lock_chassis()

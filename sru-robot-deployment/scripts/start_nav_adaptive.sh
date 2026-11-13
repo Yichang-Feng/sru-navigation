@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Unitree Go2W 自主避障导航系统启动器 (自定义前瞻距离 & 容错增强版)
+# Unitree Go2W 双因子自适应动态前瞻导航系统启动器 (start_nav_adaptive.sh)
 #
-# 基础架构：基于原版稳定运行的 start_nav.sh 全局多节点 tmux 协同系统
-# 新增功能：
-#   1. 命令行参数配置前瞻动态胡萝卜点距离 (lookahead carrot distance，默认 2.0m)
-#   2. 容错运行：默认不上报 error / failed，避障停滞不锁死，深度帧短暂延迟不报错
-#   3. 手柄映射：[按钮 A] 启动/恢复导航；[按钮 B] 暂停/刹停
-#   4. RViz 可视化：自动挂载 rviz.rviz (含全局 PCD 地图、实时激光、橙色胡萝卜点、下点工具)
+# 特色能力：
+#   1. 双因子自适应前瞻 (Dual-Factor Adaptive Lookahead)：
+#      - 因子一：Path 前向滑动窗口曲率自适应 (急弯提前降速至 0.5m，防切内角撞门框)
+#      - 因子二：深度图局部通道净空自适应与空间锁存 (过窄门锁定 0.5m，出关平滑恢复)
+#   2. 门洞对准推力补偿 (Door Speed Boost)：
+#      - 解决 L=0.5m 时对数距离引起的蠕动爬行，当朝向对正门洞时赋予保底速度 (0.35m/s)
+#   3. 零侵入原有系统：完全独立启动，原版 start_nav.sh 与 start_nav_custom.sh 保持不变
 #
-# 使用方式：
-#   ./start_nav_custom.sh              # 默认前瞻 2.0m，不上报 error/failed
-#   ./start_nav_custom.sh 1.5          # 设置前瞻 1.5m
-#   ./start_nav_custom.sh -l 2.5       # 设置前瞻 2.5m
-#   ./start_nav_custom.sh --no-rviz    # 不自动打开 RViz 窗口 (纯后台运行)
-#   ./start_nav_custom.sh -h           # 查看详细帮助信息
+# 用法：
+#   ./start_nav_adaptive.sh                     # 默认启动双因子自适应 (0.5m ~ 2.0m)
+#   ./start_nav_adaptive.sh --min 0.4 --max 1.8 # 自定义前瞻范围
+#   ./start_nav_adaptive.sh --no-rviz           # 仅启动后台节点，不打开 RViz
+#   ./start_nav_adaptive.sh -h                  # 查看帮助
 #
 # 停止导航：在任何终端执行 ./stop_nav.sh
 # ==============================================================================
@@ -29,7 +29,12 @@ ROS_SETUP="/opt/ros/humble/setup.bash"
 # ==========================================
 # 默认参数配置
 # ==========================================
-LOOKAHEAD_DIST="2.0"
+ENABLE_ADAPTIVE="true"
+ADAPTIVE_MODE="both"  # "both" | "curvature_only" | "clearance_only" | "none"
+LOOKAHEAD_MIN="0.5"
+LOOKAHEAD_MAX="2.0"
+WINDOW_DIST="1.5"
+DOOR_SPEED_BOOST="0.35"
 REPORT_FAILURE="false"
 ENABLE_RVIZ=true
 
@@ -38,17 +43,22 @@ ENABLE_RVIZ=true
 # ==========================================
 show_help() {
     echo "=================================================================="
-    echo "Unitree Go2W 导航系统一键启动脚本 (容错与前瞻距离控制版)"
+    echo "Unitree Go2W 双因子自适应动态前瞻导航系统启动器"
     echo "用法:"
-    echo "  $0 [前瞻距离(米)] [选项]"
+    echo "  $0 [选项]"
     echo ""
-    echo "示例:"
-    echo "  $0                 # 默认前瞻 2.0m，不上报 error/failed"
-    echo "  $0 1.5             # 设置前瞻胡萝卜点距离为 1.5m"
-    echo "  $0 -l 2.5          # 设置前瞻胡萝卜点距离为 2.5m"
-    echo "  $0 --no-rviz       # 仅启动后台节点，不弹 RViz 窗口"
-    echo "  $0 --report-failure # 恢复严格模式 (上报 error/failed 并在停滞时自锁)"
-    echo "  $0 -h | --help     # 显示此帮助"
+    echo "选项:"
+    echo "  --curv-only         【测试推荐】仅保留 Path 曲率转弯判断 (彻底关闭视觉窄门检测，防视觉误判)"
+    echo "  --door-only         【测试模式】仅保留局部窄门净空感知 (关闭 Path 曲率预判)"
+    echo "  --mode <模式>        显式指定模式: both | curvature_only | clearance_only | none"
+    echo "  --min <距离>        设置自适应前瞻下界 (默认 0.5m)"
+    echo "  --max <距离>        设置自适应前瞻上界 (默认 2.0m)"
+    echo "  --boost <速度>      设置过门保底速度 (默认 0.35m/s)"
+    echo "  --window <距离>     设置曲率前瞻滑动窗口距离 (默认 1.5m)"
+    echo "  --no-adaptive       禁用自适应前瞻 (使用固定 2.0m)"
+    echo "  --no-rviz           后台运行，不自动弹出 RViz 窗口"
+    echo "  --report-failure    开启严格报错模式 (停滞报错)"
+    echo "  -h | --help         显示帮助"
     echo "=================================================================="
     exit 0
 }
@@ -58,9 +68,38 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             show_help
             ;;
-        -l|--lookahead|--lookahead-distance)
-            LOOKAHEAD_DIST="$2"
+        --curv-only|--curvature-only|--curv)
+            ADAPTIVE_MODE="curvature_only"
+            shift
+            ;;
+        --door-only|--clearance-only|--door)
+            ADAPTIVE_MODE="clearance_only"
+            shift
+            ;;
+        --mode)
+            ADAPTIVE_MODE="$2"
             shift 2
+            ;;
+        --min)
+            LOOKAHEAD_MIN="$2"
+            shift 2
+            ;;
+        --max)
+            LOOKAHEAD_MAX="$2"
+            shift 2
+            ;;
+        --boost)
+            DOOR_SPEED_BOOST="$2"
+            shift 2
+            ;;
+        --window)
+            WINDOW_DIST="$2"
+            shift 2
+            ;;
+        --no-adaptive)
+            ENABLE_ADAPTIVE="false"
+            ADAPTIVE_MODE="none"
+            shift
             ;;
         --no-rviz)
             ENABLE_RVIZ=false
@@ -79,14 +118,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            # 如果是纯数字或浮点数，直接作为前瞻距离
-            if [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-                LOOKAHEAD_DIST="$1"
-                shift
-            else
-                echo "[!] 警告: 未知参数 '$1'，将被忽略。使用 -h 查看帮助。"
-                shift
-            fi
+            echo "[!] 警告: 未知参数 '$1'，将被忽略。使用 -h 查看帮助。"
+            shift
             ;;
     esac
 done
@@ -120,7 +153,6 @@ if [ ! -f "$WS/install/setup.bash" ]; then
     exit 1
 fi
 
-# 若已有同名 session 运行中，提示用户
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "[!] 提示: 导航系统已经在后台运行 (tmux 会话: $SESSION)。"
     echo "    若想重新以新参数启动，请先在终端运行: ./stop_nav.sh"
@@ -133,21 +165,15 @@ if tmux has-session -t "=$SESSION" 2>/dev/null; then
     exit 0
 fi
 
-# ==========================================
-# 打印启动摘要信息
-# ==========================================
 echo "=================================================================="
-echo ">>> Unitree Go2W 自主避障导航系统启动器"
-echo ">>> 萝卜点前瞻距离 (Lookahead Distance) : ${LOOKAHEAD_DIST} 米"
-echo ">>> 失败与错误状态上报 (Report Failure) : ${REPORT_FAILURE} (不上报/停滞不锁死)"
-echo ">>> 手柄控制说明:"
-echo "    - [按钮 A (Button 0)] : 启动 / 恢复导航 (Start / Resume)"
-echo "    - [按钮 B (Button 1)] : 暂停 / 即时刹停 (Pause / Stop)"
+echo ">>> Unitree Go2W 双因子自适应动态前瞻导航系统启动器"
+echo ">>> 前瞻自适应使能: $ENABLE_ADAPTIVE [模式: $ADAPTIVE_MODE]"
+echo ">>> 前瞻范围: ${LOOKAHEAD_MIN}m ~ ${LOOKAHEAD_MAX}m"
+echo ">>> 前向曲率探查窗口: ${WINDOW_DIST}m, 窄门推力保底: ${DOOR_SPEED_BOOST}m/s"
+echo ">>> 容错模式 (report_failure): $REPORT_FAILURE"
+echo ">>> 自动打开 RViz: $ENABLE_RVIZ"
 echo "=================================================================="
 
-# ==========================================
-# 配置启用的节点
-# ==========================================
 NAMES=()
 COMMANDS=()
 DELAYS=()
@@ -195,34 +221,17 @@ if [ "$ENABLE_LOCAL_PLANNER" = true ]; then
 fi
 
 if [ "$ENABLE_RL_LOCAL_PLANNER" = true ]; then
-    add_node "RL Local Planner" \
-        "ros2 launch rl_nav_controller rl_nav_controller.launch.py lookahead_distance:=${LOOKAHEAD_DIST} report_failure:=${REPORT_FAILURE}" 0
-fi
-
-# RViz 窗口拉起 (仅在检测到图形界面 DISPLAY 时启动)
-if [ "$ENABLE_RVIZ" = true ]; then
-    if [ -n "${DISPLAY:-}" ]; then
-        if [ -f "$WS/rviz.rviz" ]; then
-            add_node "RViz2 Visualizer" \
-                "rviz2 -d '$WS/rviz.rviz'" 0
-        else
-            add_node "RViz2 Visualizer" \
-                "rviz2" 0
-        fi
-    else
-        echo "[i] 未检测到 DISPLAY 显示环境变量 (可能为纯 SSH 登录)，已跳过自动拉起 RViz 窗口。"
-    fi
+    RL_ARGS="--ros-args -p enable_adaptive_lookahead:=${ENABLE_ADAPTIVE} -p adaptive_mode:=${ADAPTIVE_MODE} -p lookahead_min:=${LOOKAHEAD_MIN} -p lookahead_max:=${LOOKAHEAD_MAX} -p adaptive_window_dist:=${WINDOW_DIST} -p door_speed_boost:=${DOOR_SPEED_BOOST} -p report_failure:=${REPORT_FAILURE}"
+    # 自动兼容：优先检测 ros2 entrypoint，若尚未编译注册则无缝回退到 python3 源码直运，100% 防止 'no executable found'
+    RL_CMD="if ros2 pkg executables rl_nav_controller 2>/dev/null | grep -q 'rl_nav_controller_adaptive'; then ros2 run rl_nav_controller rl_nav_controller_adaptive $RL_ARGS; else python3 src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py $RL_ARGS; fi"
+    add_node "RL Adaptive Local Planner" "$RL_CMD" 0
 fi
 
 COUNT=${#NAMES[@]}
 if [ "$COUNT" -eq 0 ]; then
-    echo "错误：没有启用任何 ROS2 节点！"
+    echo "没有启用任何 ROS2 节点！"
     exit 1
 fi
-
-echo "========================================"
-echo "ROS2 导航系统启动中... 启用节点数：$COUNT"
-echo "========================================"
 
 # ==========================================
 # 创建 tmux 会话和动态分屏
@@ -248,7 +257,7 @@ if [ "$COUNT" -gt 1 ]; then
 fi
 
 # ==========================================
-# 依次启动 ROS2 节点
+# 启动 ROS2 节点
 # ==========================================
 for ((i=0; i<COUNT; i++)); do
     NAME="${NAMES[$i]}"
@@ -256,7 +265,7 @@ for ((i=0; i<COUNT; i++)); do
     PANE="${PANES[$i]}"
     DELAY="${DELAYS[$i]}"
 
-    echo "[$((i+1))/$COUNT] 启动 $NAME"
+    echo "[$((i+1))/$COUNT] 正在启动: $NAME"
     tmux select-pane -t "$PANE" -T "$NAME"
     tmux send-keys -t "$PANE" \
         "source '$ROS_SETUP' && cd '$WS' && source install/setup.bash && $CMD" C-m
@@ -268,15 +277,27 @@ done
 
 tmux select-pane -t "${PANES[0]}"
 
-echo ""
-echo "========================================"
-echo "导航启动命令已全部发送！"
-echo "tmux 会话：$SESSION"
-echo "========================================"
+# ==========================================
+# 自动启动 RViz (可选)
+# ==========================================
+if [ "$ENABLE_RVIZ" = true ]; then
+    RVIZ_CFG="$WS/rviz.rviz"
+    if [ ! -f "$RVIZ_CFG" ]; then
+        RVIZ_CFG="$WS/src/rl_nav_controller/rviz/rviz.rviz"
+    fi
+    if [ -f "$RVIZ_CFG" ]; then
+        echo "[✓] 正在后台启动 RViz 可视化界面 (配置文件: $RVIZ_CFG)..."
+        nohup bash -c "source '$ROS_SETUP' && source '$WS/install/setup.bash' && ros2 run rviz2 rviz2 -d '$RVIZ_CFG'" >/dev/null 2>&1 &
+    fi
+fi
 
-# ==========================================
-# 进入 tmux
-# ==========================================
+echo ""
+echo "=================================================================="
+echo ">>> Unitree Go2W 双因子自适应导航系统启动完成！"
+echo ">>> 手柄操作: [A] 启动/恢复导航  |  [B] 暂停刹停"
+echo ">>> 停止运行: ./stop_nav.sh"
+echo "=================================================================="
+
 if [ -z "${TMUX:-}" ]; then
     tmux attach-session -t "$SESSION"
 else

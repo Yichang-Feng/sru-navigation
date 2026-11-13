@@ -28,6 +28,7 @@ ROS_SETUP="/opt/ros/humble/setup.bash"
 # ==========================================
 # 默认参数配置
 # ==========================================
+CAMERA_TYPE="realsense"         # 相机选择: "realsense" (默认, Intel RealSense D435/D435i) | "zed" (Stereolabs ZED 2i)
 ENABLE_ADAPTIVE="true"
 ADAPTIVE_MODE="curvature_only"  # 默认使用 curvature_only，避免窄走廊双侧墙壁被视觉误判为窄门导致前瞻锁死在 0.5m
 LOOKAHEAD_MIN="0.5"
@@ -63,6 +64,9 @@ show_help() {
     echo "  $0 [选项]"
     echo ""
     echo "选项:"
+    echo "  --realsense | --d435 使用 Intel RealSense D435/D435i 深度相机 (默认)"
+    echo "  --zed               使用 Stereolabs ZED 2i 深度相机 (可选)"
+    echo "  --camera <类型>     显式指定相机类型: zed | realsense"
     echo "  --curv-only         仅保留 Path 曲率转弯判断 + 楼梯感知 (防平地视觉误判)"
     echo "  --door-only         仅保留局部窄门净空感知 + 楼梯感知"
     echo "  --mode <模式>        显式指定自适应模式: both | curvature_only | clearance_only | none"
@@ -94,6 +98,18 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
             show_help
+            ;;
+        --realsense|--d435|--d435i)
+            CAMERA_TYPE="realsense"
+            shift
+            ;;
+        --zed|--zed2i|--zedx)
+            CAMERA_TYPE="zed"
+            shift
+            ;;
+        --camera)
+            CAMERA_TYPE="$2"
+            shift 2
             ;;
         --curv-only|--curvature-only|--curv)
             ADAPTIVE_MODE="curvature_only"
@@ -250,6 +266,7 @@ fi
 
 echo "=================================================================="
 echo ">>> Unitree Go2W 楼梯感知与双因子自适应导航系统启动器"
+echo ">>> 感知相机: $CAMERA_TYPE (可在启动时通过 --realsense 或 --zed 切换)"
 echo ">>> 楼梯感知使能: $ENABLE_STAIRS [下楼前瞻: ${STAIR_LOOKAHEAD}m, 上楼前瞻: ${STAIR_UP_LOOKAHEAD}m, 深度重映射: ${ENABLE_STAIR_REMAPPING}, 下坡阈值: ${STAIR_SLOPE_THRESH}, 上坡阈值: ${STAIR_UP_SLOPE_THRESH}, 到达阈值: ${SEGMENT_ARRIVE_THRESHOLD}m]"
 echo ">>> 平地前瞻自适应使能: $ENABLE_ADAPTIVE [模式: $ADAPTIVE_MODE, 范围: ${LOOKAHEAD_MIN}m ~ ${LOOKAHEAD_MAX}m]"
 echo ">>> 容错模式: $REPORT_FAILURE, 自动打开 RViz: $ENABLE_RVIZ"
@@ -275,7 +292,25 @@ if [ "$ENABLE_SUPER_LIO" = true ]; then
         "ros2 launch super_lio map_localization.py" 3
 fi
 
-if [ "$ENABLE_ZED" = true ]; then
+if [ "$CAMERA_TYPE" = "realsense" ]; then
+    DEPTH_TOPIC="/camera/camera/depth/image_rect_raw"
+    CAMERA_MIN_DEPTH="0.15"
+    CAMERA_MAX_DEPTH="10.0"
+    # 后台静默发布 RealSense 静态坐标变换 (base_link -> camera_link)，不占用额外 tmux 分屏
+    pkill -f "static_transform_publisher.*camera_link" 2>/dev/null || true
+    nohup ros2 run tf2_ros static_transform_publisher 0.34 0.0 0.25 0.0 0.0 0.0 base_link camera_link >/dev/null 2>&1 &
+    RS_CFG="$WS/src/rl_nav_controller/config/realsense_nav_override.yaml"
+    if [ -f "$RS_CFG" ]; then
+        add_node "RealSense D435i Camera" \
+            "ros2 launch realsense2_camera rs_launch.py config_file:='$RS_CFG' depth_module.profile:=640x480x15 rgb_camera.profile:=640x480x15 align_depth.enable:=false pointcloud.enable:=false clip_distance:=-1.0 filters:=spatial,temporal,hole_filling" 3
+    else
+        add_node "RealSense D435i Camera" \
+            "ros2 launch realsense2_camera rs_launch.py depth_module.profile:=640x480x15 rgb_camera.profile:=640x480x15 align_depth.enable:=false pointcloud.enable:=false clip_distance:=-1.0 filters:=spatial,temporal,hole_filling" 3
+    fi
+else
+    DEPTH_TOPIC="/zed/zed_node/depth/depth_registered"
+    CAMERA_MIN_DEPTH="0.25"
+    CAMERA_MAX_DEPTH="10.0"
     ZED_CFG="$WS/src/rl_nav_controller/config/zed_nav_override.yaml"
     if [ -f "$ZED_CFG" ]; then
         add_node "ZED 2i Camera" \
@@ -303,6 +338,9 @@ fi
 
 if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
     RL_ARGS="--ros-args \
+        -p depth_topic:=${DEPTH_TOPIC} \
+        -p min_depth:=${CAMERA_MIN_DEPTH} \
+        -p max_depth:=${CAMERA_MAX_DEPTH} \
         -p enable_stairs_mode:=${ENABLE_STAIRS} \
         -p enable_stair_remapping:=${ENABLE_STAIR_REMAPPING} \
         -p stair_lookahead_dist:=${STAIR_LOOKAHEAD} \
@@ -323,8 +361,8 @@ if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
         -p terminal_heading_tol:=${HEADING_TOL} \
         -p report_failure:=${REPORT_FAILURE}"
 
-    # 自动兼容：优先检测 ros2 entrypoint，若尚未编译注册则无缝回退到 python3 源码直运
-    RL_CMD="if ros2 pkg executables rl_nav_controller 2>/dev/null | grep -q 'rl_nav_controller_stairs'; then ros2 run rl_nav_controller rl_nav_controller_stairs $RL_ARGS; else python3 src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py $RL_ARGS; fi"
+    # 直接执行 Python 脚本源码并显式注入包路径，彻底规避 setuptools entry_points 元数据脱节与包名遮蔽
+    RL_CMD="PYTHONPATH=\"\$WS/src/rl_nav_controller:\${PYTHONPATH:-}\" python3 -u src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py $RL_ARGS"
     add_node "RL Stairs-Aware Local Planner" "$RL_CMD" 0
 fi
 

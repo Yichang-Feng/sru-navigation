@@ -72,6 +72,25 @@ class MockRobotController:
             self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
             self.set_state(NavState.RUNNING, reason="Button A pressed")
 
+    def on_motion_enable(self, enabled: bool):
+        """Simulate Unitree wireless controller button B/A events via /motion_enabled."""
+        if not enabled:
+            if self.state in (NavState.RUNNING, NavState.IDLE, NavState.FAILED):
+                self.is_abort_goal = False
+                self.set_state(NavState.STOPPED, reason="Motion disabled (/motion_enabled=False)")
+                self._stop_robot()
+                if self.path_tracker.has_path():
+                    self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+        else:
+            if self.state == NavState.STOPPED:
+                if self.path_tracker.has_path():
+                    self.is_abort_goal = False
+                    self.path_tracker.realign_to_robot(self.robot_pos_w[:2])
+                    self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+                    self.set_state(NavState.RUNNING, reason="Motion enabled (/motion_enabled=True)")
+                else:
+                    self.set_state(NavState.IDLE, reason="Motion enabled with no path")
+
     def step_control_loop(self, dt=0.1):
         """Simulate one execution of generate_cmd_vel()."""
         self.robot_odom_time += dt
@@ -174,12 +193,57 @@ def test_genuine_stall_triggers_failed():
     print("  -> Passed: Genuine stall correctly transitions to FAILED after 4.0s per standard spec.")
 
 
+def test_unitree_wireless_controller_b_motion_disabled():
+    print("[TEST] 3. Unitree Wireless Controller Button B (/motion_enabled=False) & Button A Resume...")
+    controller = MockRobotController(blocked_timeout=4.0, report_failure=True)
+
+    # 1. Start navigating
+    pts = [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]]
+    controller.load_path(pts)
+    assert controller.state == NavState.RUNNING
+
+    # Move for 1.5s
+    for _ in range(15):
+        controller.robot_pos_w[0] += 0.05
+        controller.linear_vel[0] = 0.5
+        controller.step_control_loop(dt=0.1)
+    assert controller.state == NavState.RUNNING
+
+    # 2. User presses Button B on Unitree Wireless Controller -> go2w_bridge publishes /motion_enabled = False
+    controller.on_motion_enable(False)
+    assert controller.state == NavState.STOPPED, f"Expected STOPPED, got {controller.state.value}"
+    assert controller.robot_braked is True
+    assert controller.path_tracker.has_path() is True, "Path MUST be retained on Button B press!"
+
+    # 3. Dog is stationary in STOPPED for 15.0 seconds (way past 4.0s blocked_timeout)
+    for _ in range(150):
+        controller.linear_vel = np.array([0.0, 0.0, 0.0])
+        controller.step_control_loop(dt=0.1)
+        assert controller.state == NavState.STOPPED, f"State must stay STOPPED, got {controller.state.value}"
+
+    print("  -> Passed: /motion_enabled=False kept robot in STOPPED for 15s without entering FAILED.")
+
+    # 4. User presses Button A on Unitree Wireless Controller -> go2w_bridge publishes /motion_enabled = True
+    controller.on_motion_enable(True)
+    assert controller.state == NavState.RUNNING, f"Expected RUNNING after Button A, got {controller.state.value}"
+
+    # 5. Move again
+    for _ in range(10):
+        controller.robot_pos_w[0] += 0.03
+        controller.linear_vel[0] = 0.3
+        controller.step_control_loop(dt=0.1)
+        assert controller.state == NavState.RUNNING
+
+    print("  -> Passed: /motion_enabled=True cleanly resumed navigation without false stall.")
+
+
 if __name__ == "__main__":
     print("==================================================================")
     print("   TESTING JOYSTICK B PAUSE / RESUME & STALL DETECTION FIX")
     print("==================================================================")
     test_button_b_pause_and_resume()
     test_genuine_stall_triggers_failed()
+    test_unitree_wireless_controller_b_motion_disabled()
     print("==================================================================")
     print("   ALL TESTS PASSED SUCCESSFULLY (100% OK)")
     print("==================================================================")

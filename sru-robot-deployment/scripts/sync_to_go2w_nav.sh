@@ -9,7 +9,7 @@
 set -e
 
 # 支持通过命令行传参覆盖目标 IP: bash scripts/sync_to_go2w_nav.sh [IP]
-ROBOT_IP="${1:-${ROBOT_IP:-10.3.42.161}}"
+ROBOT_IP="${1:-${ROBOT_IP:-192.168.31.186}}"
 ROBOT_USER="agile"
 
 LOCAL_WS="/home/yichangfeng/go2w_robot_ref/go2w_nav_ros2_ws"
@@ -46,11 +46,35 @@ WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "$WORKSPACE_DIR/rl_nav_controller.py" ]; then
     scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
 fi
+if [ -f "$WORKSPACE_DIR/rl_nav_controller_adaptive.py" ]; then
+    scp "$WORKSPACE_DIR/rl_nav_controller_adaptive.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py"
+fi
+if [ -f "$WORKSPACE_DIR/rl_nav_controller_stairs.py" ]; then
+    scp "$WORKSPACE_DIR/rl_nav_controller_stairs.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py"
+fi
+if [ -f "$WORKSPACE_DIR/path_tracker.py" ]; then
+    scp "$WORKSPACE_DIR/path_tracker.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/path_tracker.py"
+fi
+if [ -f "$WORKSPACE_DIR/adaptive_path_tracker.py" ]; then
+    scp "$WORKSPACE_DIR/adaptive_path_tracker.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py"
+fi
+if [ -f "$WORKSPACE_DIR/stairs_depth_processor.py" ]; then
+    scp "$WORKSPACE_DIR/stairs_depth_processor.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/stairs_depth_processor.py"
+fi
+if [ -f "$WORKSPACE_DIR/scripts/setup_rl_nav_controller.py" ]; then
+    scp "$WORKSPACE_DIR/scripts/setup_rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/setup.py"
+elif [ -f "${LOCAL_WS}/src/rl_nav_controller/setup.py" ]; then
+    scp "${LOCAL_WS}/src/rl_nav_controller/setup.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/setup.py"
+fi
 if [ -f "$WORKSPACE_DIR/scripts/constants.py" ]; then
     scp "$WORKSPACE_DIR/scripts/constants.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py"
 fi
 if [ -f "$WORKSPACE_DIR/scripts/rl_nav_controller.launch.py" ]; then
     scp "$WORKSPACE_DIR/scripts/rl_nav_controller.launch.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/launch/rl_nav_controller.launch.py"
+fi
+if [ -f "$WORKSPACE_DIR/scripts/realsense_nav_override.yaml" ]; then
+    ssh "$ROBOT_USER@$ROBOT_IP" "mkdir -p ~/go2w_nav_ros2_ws/src/rl_nav_controller/config" 2>/dev/null || true
+    scp "$WORKSPACE_DIR/scripts/realsense_nav_override.yaml" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/config/realsense_nav_override.yaml"
 fi
 
 echo "[✓] rl_nav_controller 源码与模型同步完成。"
@@ -73,27 +97,45 @@ if [ -f "$WORKSPACE_DIR/scripts/door_diagnostic_logger.py" ]; then
     scp "$WORKSPACE_DIR/scripts/door_diagnostic_logger.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/door_diagnostic_logger.py"
     ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/door_diagnostic_logger.py"
 fi
+if [ -f "$WORKSPACE_DIR/scripts/test_realsense_max_distance.py" ]; then
+    scp "$WORKSPACE_DIR/scripts/test_realsense_max_distance.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/test_realsense_max_distance.py"
+    ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/test_realsense_max_distance.py"
+fi
 
 if [ -f "$WORKSPACE_DIR/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md" ]; then
     scp "$WORKSPACE_DIR/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/GO2W_DOOR_NAVIGATION_HANDOVER.md" 2>/dev/null || true
+fi
+if [ -f "$WORKSPACE_DIR/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md" ]; then
+    scp "$WORKSPACE_DIR/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md" 2>/dev/null || true
 fi
 
 ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/start_nav.sh ~/go2w_nav_ros2_ws/stop_nav.sh"
 echo "[✓] go2w_nav_ros2_ws 启动脚本与文档同步完成 (已跳过所有 rviz 文件推送)。"
 
-# 5. 自动恢复与清理机载 ~/sru_ws 目录文件
-echo -e "\n[3/4] 恢复与清理机载 ~/sru_ws 目录 (恢复原版 start_go2w_system.sh，清理临时文件)..."
-if [ -d "$HOME/go2w_robot_ref/sru_ws" ] || [ -f "$WORKSPACE_DIR/scripts/start_go2w_system.sh" ]; then
-    scp "$WORKSPACE_DIR/scripts/start_go2w_system.sh" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/start_go2w_system.sh"
-    ssh "$ROBOT_USER@$ROBOT_IP" "rm -f ~/sru_ws/start_go2w_map_nav.sh ~/sru_ws/go2w_local_nav.rviz ~/sru_ws/map/map.pcd && chmod +x ~/sru_ws/start_go2w_system.sh 2>/dev/null || true"
-    if [ -f "$WORKSPACE_DIR/rl_nav_controller.py" ]; then
-        scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py" 2>/dev/null || true
-    fi
-    if [ -f "$WORKSPACE_DIR/scripts/constants.py" ]; then
-        scp "$WORKSPACE_DIR/scripts/constants.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/constants.py" 2>/dev/null || true
-    fi
-    echo "[✓] 机载 ~/sru_ws 目录已成功恢复为原版状态！"
+# 5. 自动恢复与同步机载 ~/sru_ws 目录脚本与配置
+echo -e "\n[3/4] 同步机载 ~/sru_ws 目录 (start_local_sru.sh / stop_local_sru.sh 与控制器)..."
+if [ -f "$WORKSPACE_DIR/scripts/start_local_sru.sh" ]; then
+    scp "$WORKSPACE_DIR/scripts/start_local_sru.sh" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/start_local_sru.sh"
+    ssh "$ROBOT_USER@$ROBOT_IP" "cd ~/sru_ws && chmod +x start_local_sru.sh && ln -sf start_local_sru.sh start_go2w_system.sh"
 fi
+if [ -f "$WORKSPACE_DIR/scripts/stop_local_sru.sh" ]; then
+    scp "$WORKSPACE_DIR/scripts/stop_local_sru.sh" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/stop_local_sru.sh"
+    ssh "$ROBOT_USER@$ROBOT_IP" "cd ~/sru_ws && chmod +x stop_local_sru.sh && ln -sf stop_local_sru.sh stop_go2w_system.sh"
+fi
+ssh "$ROBOT_USER@$ROBOT_IP" "rm -f ~/sru_ws/start_go2w_map_nav.sh ~/sru_ws/go2w_local_nav.rviz ~/sru_ws/map/map.pcd 2>/dev/null || true"
+if [ -f "$WORKSPACE_DIR/rl_nav_controller.py" ]; then
+    scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py" 2>/dev/null || true
+fi
+if [ -f "$WORKSPACE_DIR/scripts/constants.py" ]; then
+    scp "$WORKSPACE_DIR/scripts/constants.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/constants.py" 2>/dev/null || true
+fi
+if [ -f "$WORKSPACE_DIR/scripts/rl_nav_controller.launch.py" ]; then
+    scp "$WORKSPACE_DIR/scripts/rl_nav_controller.launch.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/launch/rl_nav_controller.launch.py" 2>/dev/null || true
+fi
+if [ -f "$WORKSPACE_DIR/scripts/realsense_nav_override.yaml" ]; then
+    scp "$WORKSPACE_DIR/scripts/realsense_nav_override.yaml" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/realsense_nav_override.yaml" 2>/dev/null || true
+fi
+echo "[✓] 机载 ~/sru_ws 目录已成功同步为最新 start_local_sru.sh / stop_local_sru.sh！"
 
 # 6. 提示或自动在机载平台编译
 echo -e "\n[4/4] 在机器狗机载平台上编译 rl_nav_controller..."

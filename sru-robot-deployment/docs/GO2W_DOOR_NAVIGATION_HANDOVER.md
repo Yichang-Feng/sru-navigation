@@ -77,8 +77,8 @@ $$\text{命令：}\quad \texttt{./start_nav_custom.sh 0.5}$$
 ### 4.1 代码同步操作（已剔除 RViz 冗余编译）
 在主机开发环境终端，运行专属一键同步脚本：
 ```bash
-# 自动同步纯 Python 控制器与启动脚本至狗机 (默认 IP: 10.3.42.161)
-bash scripts/sync_to_go2w_nav.sh 10.3.42.161
+# 自动同步纯 Python 控制器与启动脚本至狗机 (默认 IP: 192.168.31.186)
+bash scripts/sync_to_go2w_nav.sh 192.168.31.186
 ```
 * **注意**：脚本已剔除 `rviz.rviz` 与任何可视化大包的推送，并在狗机上严格执行：
   ```bash
@@ -89,7 +89,7 @@ bash scripts/sync_to_go2w_nav.sh 10.3.42.161
 ### 4.2 启动导航节点（动态控制前瞻）
 登录机器狗车载终端：
 ```bash
-ssh agile@10.3.42.161
+ssh agile@192.168.31.186
 cd ~/go2w_nav_ros2_ws
 ```
 根据测试场景选择前瞻距离：
@@ -119,7 +119,7 @@ cd ~/go2w_nav_ros2_ws && ./stop_nav.sh
 ### 4.5 运行诊断记录器（抓取 40×64 深度图与热力图）
 若需复现或录制进门瞬间网络眼里的世界（诊断感知是否将门洞抹平、前瞻目标向量是否被墙体拉偏）：
 ```bash
-ssh agile@10.3.42.161
+ssh agile@192.168.31.186
 
 # 方式 1：默认启动（按当前时间戳自动创建独立会话文件夹）
 python3 ~/go2w_nav_ros2_ws/door_diagnostic_logger.py
@@ -173,7 +173,7 @@ python3 ~/go2w_nav_ros2_ws/door_diagnostic_logger.py fail_2.0m
 
 ## 6. 核心代码与工程文件映射清单
 
-| 文件路径（开发机） | 机载路径（agile@10.3.42.161） | 职责说明 |
+| 文件路径（开发机） | 机载路径（agile@192.168.31.186） | 职责说明 |
 |:---|:---|:---|
 | [`rl_nav_controller.py`](file:///home/yichangfeng/sru-navigation-learning/rl_nav_controller.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py` | 核心强化学习避障与路径跟踪节点（包含前瞻提取、容错不上报） |
 | [`scripts/constants.py`](file:///home/yichangfeng/sru-navigation-learning/scripts/constants.py) | `~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/constants.py` | 手柄按键映射（A=启动，B=暂停刹停）与参数基准 |

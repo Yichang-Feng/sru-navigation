@@ -68,6 +68,15 @@ def generate_launch_description():
     goal_reached_timeout_arg = DeclareLaunchArgument('goal_reached_timeout', default_value='1.0', description='Goal reached timeout before auto transition to idle')
     goal_reached_timeout = LaunchConfiguration('goal_reached_timeout')
 
+    depth_topic_arg = DeclareLaunchArgument('depth_topic', default_value='/camera/camera/depth/image_rect_raw', description='Depth image topic')
+    depth_topic = LaunchConfiguration('depth_topic')
+
+    min_depth_arg = DeclareLaunchArgument('min_depth', default_value='0.15', description='Min depth in meters')
+    min_depth = LaunchConfiguration('min_depth')
+
+    max_depth_arg = DeclareLaunchArgument('max_depth', default_value='10.0', description='Max depth in meters')
+    max_depth = LaunchConfiguration('max_depth')
+
     # ----------------------------------------------------------------------------
     # 2. Package names
     # ----------------------------------------------------------------------------
@@ -145,6 +154,9 @@ def generate_launch_description():
             'segment_arrive_threshold': PythonExpression(["float('", segment_arrive_threshold, "')"]),
             'blocked_timeout': PythonExpression(["float('", blocked_timeout, "')"]),
             'goal_reached_timeout': PythonExpression(["float('", goal_reached_timeout, "')"]),
+            'depth_topic': depth_topic,
+            'min_depth': PythonExpression(["float('", min_depth, "')"]),
+            'max_depth': PythonExpression(["float('", max_depth, "')"]),
         }],
         arguments=[
             PythonExpression([
@@ -179,6 +191,9 @@ def generate_launch_description():
         segment_arrive_threshold_arg,
         blocked_timeout_arg,
         goal_reached_timeout_arg,
+        depth_topic_arg,
+        min_depth_arg,
+        max_depth_arg,
 
         # 2) always-launch nodes
         joy_node,

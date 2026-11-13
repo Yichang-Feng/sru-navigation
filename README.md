@@ -1,301 +1,328 @@
-# SRU Navigation Learning - RL Training Framework
+# SRU Navigation — Unitree Go2W 端到端导航系统
 
-[Paper](https://arxiv.org/abs/2506.05997) | [Website](https://michaelfyang.github.io/sru-project-website/)
+[论文](https://arxiv.org/abs/2506.05997) | [项目主页](https://michaelfyang.github.io/sru-project-website/)
 
-**📌 Important Note**: This repository contains the RL training framework for the SRU navigation project, providing neural network architectures and on-policy training algorithms (PPO/MDPO). This repository does not include the simulation environments or task definitions. See the [project website](https://michaelfyang.github.io/sru-project-website/) for the complete navigation system.
+> 本仓库包含 **SRU（空间增强记忆循环单元）导航系统**从 IsaacLab 仿真训练到 Unitree Go2W 真机部署的**完整全栈代码**。
+> 包括：RL 训练算法库、5-Phase 课程训练脚本、模型导出工具，以及实机 ROS 2 导航节点和两种部署模式（纯局部 SRU 避障 / 全局规划 + SRU 局部导航联合）。
 
-## Overview
+---
 
-End-to-end RL training framework for visual navigation with SRU (Spatially-Enhanced Recurrent Units) architecture. This repository extends the original [rsl_rl](https://github.com/leggedrobotics/rsl_rl) framework with:
+## 系统全景图
 
-- **SRU Architecture**: Advanced recurrent networks with spatial transformation operations for implicit spatial memory
-- **Attention Mechanisms**: Self-attention and cross-attention modules for multimodal fusion
-- **Training Algorithms**: PPO, SPO, and MDPO (with Deep Mutual Learning) implementations
-- **Multi-Camera Support**: Native handling of 1-2 camera inputs with proper masking
+```
+┌─────────────────────────────────────────────────────────────┐
+│          Step 1: IsaacLab 仿真训练（开发机 RTX 4090）          │
+│                                                             │
+│  IsaacLab/source/isaaclab_nav_task/   ← 仿真环境 & 任务定义   │
+│  rsl_rl/                              ← SRU 算法库           │
+│  IsaacLab/train_go2w_curriculum.sh    ← 5-Phase 训练启动      │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ scripts/export_onnx.py
+                        ▼ 导出 nav_policy.onnx
+┌─────────────────────────────────────────────────────────────┐
+│          Step 2: 实机部署（Go2W 机载 Jetson Orin，192.168.123.111）│
+│                                                             │
+│  模式 A — 纯局部 SRU 避障导航                                  │
+│    /goal_pose → rl_nav_controller → /cmd_vel               │
+│    （单节点，无地图，依赖深度相机）                              │
+│                                                             │
+│  模式 B — 全局路径规划 + SRU 局部导航                           │
+│    /goal_pose → global_planner → /path                      │
+│              → path_follow / local_planner                  │
+│              → rl_nav_controller（前瞻萝卜点）→ /cmd_vel      │
+│    （结合 LiDAR SLAM 地图，适合长距离导航）                      │
+└─────────────────────────────────────────────────────────────┘
+```
 
-This framework is designed to train navigation policies that achieve 23.5% improvement over standard RNNs and enable zero-shot sim-to-real transfer.
+---
 
-## What's Included
-
-✅ **Neural Network Architectures**
-- ActorCriticSRU: SRU-based policy network with attention mechanisms
-- LSTM_SRU: Core recurrent unit with spatial transformation gates
-- Cross-attention fusion module for vision + proprioception
-- 3D positional encoding for volumetric features
-
-✅ **RL Training Algorithms**
-- PPO (Proximal Policy Optimization)
-- SPO (Symmetric Policy Optimization)
-- MDPO (Multi-Distillation Policy Optimization with Deep Mutual Learning)
-- MUON optimizer support for stable training with reduced memory usage (newly added, not in original paper)
-
-✅ **Training Infrastructure**
-- GPU-accelerated training pipeline
-- Rollout storage with hidden state tracking
-- Temporally consistent dropout across trajectories
-- Multi-sensor observation handling
-
-✅ **Model Export**
-- JIT export for PyTorch deployment
-- ONNX export for cross-platform inference (C++, ROS, TensorRT)
-- Explicit hidden state I/O for recurrent models in ONNX format
-
-✅ **Logging & Monitoring**
-- Tensorboard integration
-- Weights & Biases support
-- Neptune logging
-
-## What's NOT Included
-
-❌ Simulation environments (Isaac Lab tasks, maze generation, terrain)
-❌ Task definitions (observation spaces, reward functions, action interfaces)
-❌ Robot models and locomotion policies
-❌ Depth encoder pretraining infrastructure
-
-**Note**: The simulation environment must be installed separately. See [sru-navigation-sim](https://github.com/leggedrobotics/sru-navigation-sim) for the IsaacLab extension.
-
-## Architecture
-
-The repository is organized as follows:
+## 仓库结构
 
 ```
 sru-navigation-learning/
-├── config/                    # Training configuration files
-│   └── dummy_config.yaml      # Example PPO configuration
-├── rsl_rl/                    # Main Python package
-│   ├── algorithms/            # RL algorithms
-│   │   ├── ppo.py             # Proximal Policy Optimization
-│   │   ├── spo.py             # Symmetric Policy Optimization
-│   │   └── mdpo.py            # Multi-Distillation Policy Optimization
-│   ├── modules/               # Neural network architectures
-│   │   ├── actor_critic.py              # Basic MLP actor-critic
-│   │   ├── actor_critic_recurrent.py    # RNN-based actor-critic
-│   │   ├── actor_critic_sru.py          # SRU architecture (primary)
-│   │   └── normalizer.py                # Observation normalization
-│   ├── networks/              # Network components
-│   │   └── sru_memory/        # SRU memory modules
-│   │       ├── lstm_sru.py              # LSTM with SRU gating
-│   │       └── attention.py             # Cross-attention fusion with 3D positional encoding
-│   ├── runners/               # Training orchestration
-│   │   └── on_policy_runner.py          # Main training loop
-│   ├── storage/               # Experience replay
-│   │   └── rollout_storage.py           # Trajectory buffer
-│   ├── env/                   # Environment interface
-│   │   └── vec_env.py                   # Vectorized environment wrapper
-│   └── utils/                 # Utilities
-│       ├── trajectory_handler.py        # Padding/unpadding helpers
-│       └── logging.py                   # Logging utilities
-├── licenses/                  # Dependency licenses
-├── setup.py                   # Package installation
-├── pyproject.toml             # Project configuration
-└── README.md                  # This file
+│
+├── rsl_rl/                        # ⚙️ SRU 核心 RL 算法库（Python 包）
+│   ├── algorithms/                #   PPO / MDPO / SPO 实现
+│   ├── modules/                   #   ActorCriticSRU 网络架构
+│   ├── networks/sru_memory/       #   LSTM_SRU + 注意力机制
+│   └── runners/                   #   OnPolicyRunner 训练主循环
+│
+├── IsaacLab/                      # 🏋️ IsaacLab 仿真环境（Git 子模块）
+│   ├── source/isaaclab_nav_task/  #   Go2W 导航任务定义（环境、奖励、相机配置）
+│   ├── train_go2w_curriculum.sh   #   5-Phase 课程训练一键启动
+│   ├── train_go2w_scratch.sh      #   从头开始训练
+│   ├── train_go2w_finetune.sh     #   在已有权重基础上微调
+│   ├── play_go2w.sh               #   加载权重仿真回放（GUI 可视化）
+│   └── logs/rsl_rl/               #   训练日志与权重 checkpoint
+│
+├── sru-robot-deployment/          # 🤖 实机部署代码（见下方说明）
+│   ├── ros2_ws/src/rl_nav_controller/  # ROS 2 导航功能包（同步至机载）
+│   ├── scripts/                   #   启动/停止/同步脚本
+│   ├── config/                    #   RViz 配置
+│   ├── diagnostics/               #   诊断与测试工具
+│   └── docs/                      #   实机部署文档集合
+│
+├── scripts/                       # 🔧 开发侧工具脚本（不推送至机器狗）
+│   ├── export_onnx.py             #   训练后导出 ONNX 模型
+│   ├── export_loco_to_onnx.py     #   步态策略导出
+│   ├── prepare_warmstart_*.py     #   跨机型权重初始化
+│   ├── surgery_expand_heading*.py #   ONNX 模型外科手术（扩展观测维度）
+│   ├── compare_deployment_policies.sh # 多版本策略性能对比
+│   ├── mock_global_nav_tester.py  #   全局导航集成测试（无需机器狗）
+│   ├── test_adaptive_lookahead.py #   自适应前瞻单元测试
+│   ├── test_global_nav_integration.py # 全局导航集成测试
+│   └── benchmark/                 #   性能基准测试工具
+│
+├── docs/                          # 📚 训练与算法文档
+│   ├── go2w_nav_refactor_plan.md  #   Go2W 5-Phase 训练全指南（必读）
+│   ├── NAVIGATION_TRAINING_DESIGN.md  # 导航任务设计原理
+│   ├── SRU_NAVIGATION_EXPLAINED.md    # SRU 架构详解
+│   ├── ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md # 自适应前瞻设计
+│   ├── TENSORBOARD_METRICS_GUIDE.md   # 训练指标解读
+│   └── B2W_HEADING_CONTROL_HANDOVER.md # 航向控制（B2W 参考）
+│
+├── config/                        # 📋 训练配置
+│   └── dummy_config.yaml          #   PPO 超参数示例
+│
+├── setup.py / pyproject.toml      # 📦 rsl_rl 包安装配置
+└── README.md                      # 本文件
 ```
 
-### Key Components
+---
 
-**ActorCriticSRU** ([rsl_rl/modules/actor_critic_sru.py](rsl_rl/modules/actor_critic_sru.py))
-- Dual-input architecture: depth images + proprioceptive information
-- Processing pipeline: Self-attention → Cross-attention → SRU → MLP
-- Separate actor and critic networks with shared depth encoder
-- Time embedding for critic value estimation
-- Supports 1-2 camera inputs with automatic padding/masking
+## 一、训练指南
 
-**LSTM_SRU** ([rsl_rl/networks/sru_memory/lstm_sru.py](rsl_rl/networks/sru_memory/lstm_sru.py))
-- Multi-layer LSTM with SRU-style spatial transformation gates
-- Polynomial refinement for forget gate (from research paper)
-- Element-wise transformation operations for spatial memory
-- Orthogonal weight initialization
-
-**CrossAttentionFuseModule** ([rsl_rl/networks/sru_memory/attention.py](rsl_rl/networks/sru_memory/attention.py))
-- Fuses volumetric (image) features with proprioceptive state
-- Self-attention → Feed-forward → Cross-attention architecture
-- 3D positional encoding for spatial awareness
-- Efficient batched attention outside RNN loop
-
-**Training Algorithms** ([rsl_rl/algorithms/](rsl_rl/algorithms/))
-- PPO: Standard clipped policy optimization with value loss
-- MDPO: Deep Mutual Learning with KL-divergence distillation between two networks
-- Adaptive and fixed learning rate schedules
-
-## Installation
-
-### Standalone Installation
+### 1.1 环境准备
 
 ```bash
+# 1. 克隆本仓库（含 IsaacLab 子模块）
 git clone https://github.com/leggedrobotics/sru-navigation-learning.git
 cd sru-navigation-learning
 
-python3 -m venv sru_nav_learning
-source sru_nav_learning/bin/activate
-pip install -e .
+# 2. 安装 IsaacLab（首次）
+cd IsaacLab
+./isaaclab.sh --install  # 参考 IsaacLab 官方文档
+
+# 3. 卸载 IsaacLab 自带的 rsl_rl，安装本仓库的 SRU 增强版
+./isaaclab.sh -p -m pip uninstall rsl-rl-lib -y
+./isaaclab.sh -p -m pip install -e ..  # 安装 sru-navigation-learning 根目录的 rsl_rl
+
+# 4. 安装导航任务扩展包
+./isaaclab.sh -p -m pip install -e source/isaaclab_nav_task
+
+# 5. 激活 Conda 环境（此后所有训练命令均在此环境）
+conda activate isaaclab  # 或你的实际环境名
 ```
 
-### Installation with Isaac Lab
+### 1.2 Go2W 5-Phase 课程训练
 
-If you're using this package with Isaac Lab, you need to replace the pre-installed `rsl_rl` package.
+Go2W 采用从简单到复杂的 5 阶段递进课程（详见 [docs/go2w_nav_refactor_plan.md](docs/go2w_nav_refactor_plan.md)）：
 
-#### Directory Structure
-
-You can place this repository anywhere, but the recommended structure is:
-
-```
-IsaacLab/
-├── source/
-│   ├── isaaclab/              # Core Isaac Lab
-│   ├── isaaclab_assets/       # Asset library
-│   ├── isaaclab_rl/           # RL framework wrappers
-│   ├── isaaclab_tasks/        # Task definitions
-│   └── isaaclab_nav_task/     # Your navigation task extension
-├── rsl_rl/                    # This SRU-enhanced RL framework (recommended location)
-├── _isaac_sim/                # Isaac Sim installation
-└── isaaclab.sh                # Isaac Lab launcher script
-```
-
-**Alternative locations**:
-- Inside `source/` directory (e.g., `source/rsl_rl/`)
-- Standalone location outside IsaacLab
-- Any custom location (adjust paths accordingly)
-
-#### Installation Steps
+| Phase | 迭代范围 | 地形 | 前向速度 |
+|:---:|:---|:---|:---|
+| 1 | 0 ~ 2k | 平地 + 稀疏障碍 | 1.5 m/s |
+| 2 | 2k ~ 5k | 平地 + 稀疏障碍（降熵稳定） | 1.5 m/s |
+| 3 | 5k ~ 14k | 初级迷宫 + 10~15 cm 楼梯 | 1.6 m/s |
+| 4 | 14k ~ 24k | 20 cm 楼梯 + 深坑 + 密集迷宫 | 1.8 m/s |
+| 5 | 24k ~ 35k | 全要素精细微调 | 1.8 m/s |
 
 ```bash
-# 1. Navigate to your IsaacLab installation
-cd /path/to/IsaacLab
+cd IsaacLab
 
-# 2. Uninstall the pre-installed rsl_rl from Isaac Lab
-./isaaclab.sh -p -m pip uninstall rsl-rl-lib -y
+# 方式 A：自动化全流程（Phase 1→5 自动切换，推荐）
+conda activate isaaclab
+python train_go2w_curriculum.py --algo ppo --num_envs 1024 --headless
 
-# 3. Remove any cached rsl_rl directory (if exists)
-rm -rf _isaac_sim/kit/python/lib/python3.10/site-packages/rsl_rl
+# 方式 B：手动分 Phase 控制（适合中途介入调参）
+./train_go2w_scratch.sh      # Phase 1 从头开始
+# 确认 Phase 1 收敛后：
+./train_go2w_finetune.sh --checkpoint logs/rsl_rl/go2w_navigation_ppo/model_2000.pt
+# ...依次到 Phase 5
 
-# 4. Clone or place this repository
-# Option A: Clone at IsaacLab root level (recommended)
-git clone https://github.com/leggedrobotics/sru-navigation-learning.git rsl_rl
+# 方式 C：使用 MDPO 双策略互蒸馏算法（性能更优）
+./train_go2w_curriculum.sh --algo mdpo --num_envs 1024 --headless
 
-# Option B: Clone in source/ directory
-cd source
-git clone https://github.com/leggedrobotics/sru-navigation-learning.git rsl_rl
-cd ..
-
-# 5. Install this SRU-enhanced version in editable mode
-cd rsl_rl  # Adjust path if you placed it elsewhere
-../isaaclab.sh -p -m pip install -e .
-
-# 6. Verify installation
-../isaaclab.sh -p -c "from rsl_rl.modules import ActorCriticSRU; print('✓ SRU modules loaded')"
+# 仿真回放（GUI 可视化，验证策略）
+./play_go2w.sh --checkpoint logs/rsl_rl/go2w_navigation_ppo/model_best.pt
 ```
 
-**Important Notes**:
-- The package installs as `rsl_rl` (not `rsl_rl_lib`) to maintain compatibility with Isaac Lab imports
-- This repository directory can have any name (e.g., `sru-navigation-learning`, `rsl_rl`, etc.), but the installed package name will always be `rsl_rl`
-- The editable install (`-e`) allows you to modify the code without reinstalling
+**硬件参考**：RTX 4090 24GB，headless 模式下 1024 并行环境约占用 14~16 GB 显存。
 
-**Dependencies**:
-- PyTorch (GPU-accelerated training recommended)
-- NumPy
-- Optional: tensorboard, wandb, neptune (for logging)
+### 1.3 训练监控
 
-**Note**: This package provides only the RL training framework. To train navigation policies, you also need:
-1. A compatible simulation environment (e.g., [sru-navigation-sim](https://github.com/leggedrobotics/sru-navigation-sim))
-2. A pretrained depth encoder (see project website)
+```bash
+# Tensorboard（推荐）
+tensorboard --logdir IsaacLab/logs/rsl_rl/go2w_navigation_ppo
 
-## Usage
-
-### Configuration
-
-Training hyperparameters are specified in YAML configuration files. See [config/dummy_config.yaml](config/dummy_config.yaml) for an example PPO configuration.
-
-Key parameters:
-- `policy`: Network architecture configuration (SRU layers, attention heads, hidden dimensions)
-- `algorithm`: PPO/MDPO hyperparameters (learning rate, entropy coefficient, clip range)
-- `runner`: Training settings (number of steps per rollout, max iterations)
-
-### Training
-
-The typical training workflow with a compatible environment:
-
-```python
-from rsl_rl.runners import OnPolicyRunner
-from your_env import YourNavigationEnv  # From simulation package
-
-# Initialize environment
-env = YourNavigationEnv(num_envs=4096)
-
-# Create runner with configuration
-runner = OnPolicyRunner(env, config, device='cuda:0')
-
-# Train
-runner.learn(num_learning_iterations=10000)
+# 指标解读参考 docs/TENSORBOARD_METRICS_GUIDE.md
 ```
 
-### Logging
+---
 
-The framework supports multiple logging backends configured through the `logger` parameter:
-- **Tensorboard**: https://www.tensorflow.org/tensorboard/
-- **Weights & Biases**: https://wandb.ai/site
-- **Neptune**: https://docs.neptune.ai/
+## 二、模型导出
 
-### Model Export
+训练完成后，将 PyTorch 权重导出为 ONNX 格式（供机器狗机载 ONNX Runtime 推理）：
 
-Export trained policies for deployment:
+```bash
+# 导出标准导航策略（含 VAE 编码器）
+python scripts/export_onnx.py \
+  --checkpoint IsaacLab/logs/rsl_rl/go2w_navigation_ppo/model_best.pt \
+  --output sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
 
-```python
-# Load trained model
-policy = ActorCriticSRU(...)
-policy.load_state_dict(torch.load("checkpoint.pt"))
-
-# Export to JIT (PyTorch deployment)
-policy.export_jit(path="./exported", filename="policy.pt", normalizer=obs_normalizer)
-
-# Export to ONNX (C++, ROS, TensorRT deployment)
-policy.export_onnx(path="./exported", filename="policy.onnx", normalizer=obs_normalizer)
+# 验证导出结果
+python -c "
+import onnxruntime as ort
+sess = ort.InferenceSession('sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx')
+print('输入:', [i.name for i in sess.get_inputs()])
+print('输出:', [o.name for o in sess.get_outputs()])
+print('✓ ONNX 导出验证通过')
+"
 ```
 
-**ONNX Export Notes for Recurrent Models**:
-- Hidden states are exposed as explicit inputs/outputs (`h_in`, `c_in` → `h_out`, `c_out`)
-- Initialize hidden states to zeros at episode start
-- Pass updated hidden states back as inputs for the next timestep
+---
 
-## Key Features
+## 三、实机部署
 
-### SRU-Specific Enhancements
+> **详细部署文档**：[sru-robot-deployment/README.md](sru-robot-deployment/README.md)（含机载目录路径对照表）  
+> **必读交接文档**：[sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md)
 
-1. **Spatial Transformation Gates**: Element-wise multiplication operations enabling implicit spatial memory from egocentric observations
+### 机器狗网络拓扑
 
-2. **Multi-Camera Fusion**: Native support for multiple depth cameras with proper padding, masking, and attention mechanisms
+```
+开发机 (192.168.123.138)
+  │  ssh / rsync / scp
+  ▼
+高层算力脑：Jetson Orin DevKit — 外挂背部
+  IP: 10.3.42.161 (WiFi) / 192.168.123.111 (机载网)
+  user: agile    OS: Ubuntu 22.04 + ROS 2 Humble
+  职责: ZED 2i 相机 + SRU 策略推理 + (可选) LiDAR 重定位
+  │
+  │ /cmd_vel (ROS 2 DDS 局域网广播)
+  ▼
+底盘主脑：Jetson Orin NX — 腹部原装
+  IP: 192.168.123.18    user: unitree    OS: Ubuntu 20.04 + ROS 2 Foxy
+  职责: unitree_bridge（转发 /cmd_vel → 宇树 DDS → 运动控制板）
+  │
+  │ /api/sport/request (DDS)
+  ▼
+底层运动控制板 (192.168.123.161)：驱动 12 腿部关节 + 4 轮毂电机
+```
 
-3. **Temporally Consistent Dropout**: Dropout masks maintained across trajectory timesteps for stable training
+### 3.1 推送代码到机器狗
 
-4. **Efficient Attention**: Batched self-attention and cross-attention computed outside RNN loop for computational efficiency
+```bash
+# 在开发机，仓库根目录执行
+# （保持 WiFi 连接至 Agile-Robot-Guest 或机载 192.168.123.x 网段）
+bash sru-robot-deployment/scripts/sync_to_go2w_nav.sh
 
-5. **Deep Mutual Learning**: MDPO algorithm with KL-divergence distillation between dual networks
+# 同时推送 ONNX 模型权重
+scp sru-robot-deployment/ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
+    agile@10.3.42.161:~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/
+```
 
-6. **MUON Optimizer Integration**: Momentum Orthogonalized by Newton-schulz optimizer for hidden weight layers
-   - Uses Newton-Schulz iteration for efficient orthogonalization in bfloat16
-   - Reduces memory usage compared to Adam optimizer
-   - Provides more stable training dynamics for deep networks
-   - Automatically separates hidden weights (optimized with MUON) from biases/gains (optimized with AdamW)
+### 3.2 模式 A：纯局部 SRU 避障导航
 
-### Performance
+**适用场景**：无地图环境、临时探索、短距离任务。  
+**系统组成**：ZED 2i 相机 + SRU 策略节点。  
+**工作方式**：接收 `/goal_pose`，直接输出 `/cmd_vel`，策略用深度图隐式避障。
 
-- **23.5%** improvement over standard RNNs (LSTM/GRU)
-- **29.6%** advantage vs. explicit mapping approaches
-- **105%** better than stacked-frame baselines
-- **2.5x** improvement in challenging stair environments
-- Zero-shot sim-to-real transfer with no fine-tuning
+```bash
+# 在高层 Jetson (ssh agile@10.3.42.161)
+cd ~/go2w_nav_ros2_ws
+./start_nav.sh                    # 标准启动（ZED + 策略节点）
+# 或
+./start_nav_custom.sh 1.5         # 自定义前瞻距离 1.5m（实机调试推荐）
+# 楼梯场景
+./start_nav_stairs.sh
 
-## Related Projects
+# 在任意 PC / 机器上发布目标点
+ros2 topic pub /startNavi std_msgs/msg/Bool "{data: true}" --once
+ros2 topic pub /goal_pose geometry_msgs/PoseStamped \
+  "{header: {frame_id: 'odom'}, pose: {position: {x: 5.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}" --once
 
-| Repository | Description |
-|------------|-------------|
-| [sru-pytorch-spatial-learning](https://github.com/leggedrobotics/sru-pytorch-spatial-learning) | Core SRU PyTorch module (standalone) |
-| [sru-navigation-sim](https://github.com/leggedrobotics/sru-navigation-sim) | IsaacLab simulation environments |
-| [sru-depth-pretraining](https://github.com/leggedrobotics/sru-depth-pretraining) | Self-supervised depth encoder pretraining |
-| [sru-robot-deployment](https://github.com/leggedrobotics/sru-robot-deployment) | Real robot deployment (ROS2, Gazebo) |
+# 停止
+./stop_nav.sh
+```
 
-## Citation
+> ⚠️ **安全铁则**：首次电机测试前，**必须用支架撑起机器狗使四腿悬空**！
 
-If you use this code in your research, please cite:
+### 3.3 模式 B：全局路径规划 + SRU 局部导航（联合模式）
+
+**适用场景**：已知环境地图、长距离多点导航任务。  
+**系统组成**：LiDAR SLAM（Super LIO）+ 全局规划 + 路径跟随 + SRU 局部避障。  
+**工作方式**：`/goal_pose` → `global_planner`（全局路径）→ `path_follow`（前瞻萝卜点）→ `rl_nav_controller`（速度指令）→ `/cmd_vel`
+
+```bash
+# --- 在高层 Jetson (ssh agile@10.3.42.161) ---
+
+# 终端 1: 启动 LiDAR + Super LIO 重定位
+source /opt/ros/humble/setup.bash
+source ~/bridge_ws/install/setup.bash
+ros2 launch super_lio relocation.py rviz:=false
+
+# 终端 2: 启动 ZED 2i 相机
+source /opt/ros/humble/setup.bash
+source ~/bridge_ws/install/setup.bash
+ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2i
+
+# 终端 3: 发布相机静态 TF
+ros2 run tf2_ros static_transform_publisher 0.257 0.0 0.28 0.0 0.0 0.0 base_link zed_camera_link
+
+# 终端 4: 启动全局导航栈（全局规划 + 路径跟随 + SRU 局部节点）
+source ~/bridge_ws/install/setup.bash
+ros2 launch global_planner global_planner.launch.py
+# (global_planner 内部会自动启动 local_planner, path_follow, rl_nav_controller)
+
+# --- 在外部 PC (RViz) 或任意机器上 ---
+ros2 topic pub /startNavi std_msgs/msg/Bool "{data: true}" --once
+# 通过 RViz 的 "2D Goal Pose" 或命令行发布目标点
+ros2 topic pub /goal_pose geometry_msgs/PoseStamped "..." --once
+```
+
+**全局导航数据流详解**：  
+参见 [sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md](sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md)
+
+---
+
+## 四、相关项目仓库
+
+| 仓库 | 内容 |
+|:---|:---|
+| [sru-pytorch-spatial-learning](https://github.com/leggedrobotics/sru-pytorch-spatial-learning) | 核心 SRU PyTorch 模块（独立版本） |
+| [sru-navigation-sim](https://github.com/leggedrobotics/sru-navigation-sim) | IsaacLab 导航仿真任务扩展包 |
+| [sru-depth-pretraining](https://github.com/leggedrobotics/sru-depth-pretraining) | 深度编码器自监督预训练 |
+| [sru-robot-deployment](https://github.com/leggedrobotics/sru-robot-deployment) | 实机部署 ROS 2 包（早期独立版本） |
+
+---
+
+## 五、文档索引
+
+### 训练与算法
+| 文档 | 内容 |
+|:---|:---|
+| [docs/go2w_nav_refactor_plan.md](docs/go2w_nav_refactor_plan.md) | 🔑 **Go2W 5-Phase 训练完全指南**（超参数、课程设计、调参建议） |
+| [docs/NAVIGATION_TRAINING_DESIGN.md](docs/NAVIGATION_TRAINING_DESIGN.md) | 导航任务 MDP 设计原理（奖励函数、终止条件） |
+| [docs/SRU_NAVIGATION_EXPLAINED.md](docs/SRU_NAVIGATION_EXPLAINED.md) | SRU 架构通俗讲解 |
+| [docs/ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md](docs/ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md) | 自适应前瞻萝卜点算法设计 |
+| [docs/TENSORBOARD_METRICS_GUIDE.md](docs/TENSORBOARD_METRICS_GUIDE.md) | 训练曲线与指标解读 |
+| [docs/B2W_HEADING_CONTROL_HANDOVER.md](docs/B2W_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制（B2W 参考实现） |
+
+### 实机部署
+| 文档 | 内容 |
+|:---|:---|
+| [sru-robot-deployment/README.md](sru-robot-deployment/README.md) | 🔑 **部署目录总说明 + 机载路径对照表** |
+| [sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) | 机器狗双 Jetson 拓扑、网络、传感器、实机启动全流程 |
+| [sru-robot-deployment/docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](sru-robot-deployment/docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md) | 完整纯命令行操作手册 |
+| [sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md](sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md) | 局部 SRU 导航系统详解 |
+| [sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md](sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md) | 全局 + 局部联合导航技术规范 |
+| [sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md](sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md) | Go2W 仿真接入工程文档 |
+| [sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) | 相机配置指南 |
+| [sru-robot-deployment/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md](sru-robot-deployment/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md) | 门区穿越功能详解 |
+| [sru-robot-deployment/docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md](sru-robot-deployment/docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制功能交接 |
+
+---
+
+## 引用
 
 ```bibtex
 @article{yang2025sru,
@@ -308,37 +335,9 @@ If you use this code in your research, please cite:
 }
 ```
 
-## Contribution Guidelines
+---
 
-For documentation, we adopt the [Google Style Guide](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html) for docstrings.
+## 许可证
 
-We use the following tools for maintaining code quality:
-
-- [pre-commit](https://pre-commit.com/): Runs formatters and linters over the codebase
-- [black](https://black.readthedocs.io/en/stable/): Code formatter
-- [flake8](https://flake8.pycqa.org/en/latest/): Style checker
-
-To set up pre-commit hooks:
-
-```bash
-# Installation (one time)
-pre-commit install
-
-# Run on all files
-pre-commit run --all-files
-```
-
-## Credits
-
-This repository is built upon [rsl_rl](https://github.com/leggedrobotics/rsl_rl) from ETH Zurich Robotic Systems Lab and NVIDIA.
-
-**Original rsl_rl Maintainers**: David Hoeller and Nikita Rudin
-**SRU Extension**: Fan Yang
-**Affiliation**: Robotic Systems Lab, ETH Zurich
-**Contact**: fanyang1@ethz.ch
-
-## License
-
-This project is licensed under the **BSD-3-Clause License** - see the [LICENSE](LICENSE) file for details.
-
-See [licenses/](licenses/) directory for dependency licenses.
+BSD-3-Clause License — 详见 [LICENSE](LICENSE)。  
+依赖许可证见 [licenses/](licenses/) 目录。

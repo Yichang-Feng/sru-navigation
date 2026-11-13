@@ -29,6 +29,7 @@ import cv2
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry, Path
@@ -36,11 +37,17 @@ from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Twist, PoseStamped
 from cv_bridge import CvBridge
 
+REALSENSE_DEPTH_TOPIC = '/camera/camera/depth/image_rect_raw'
+REALSENSE_DEPTH_TOPIC_ALT = '/camera/depth/image_rect_raw'
+REALSENSE_DEPTH_TOPIC_ALIGNED = '/camera/camera/aligned_depth_to_color/image_raw'
+ZED_DEPTH_TOPIC = '/zed/zed_node/depth/depth_registered'
+
 
 class DoorDiagnosticLogger(Node):
     def __init__(self, base_dir: str = '~/door_diagnostics', session_tag: str = '', 
                  record_rate: float = 5.0, verbose: bool = False,
-                 record_remapped: bool = True, path_topic: str = '/global_path'):
+                 record_remapped: bool = True, path_topic: str = '/global_path',
+                 depth_topic: str = 'auto'):
         super().__init__('door_diagnostic_logger')
 
         self.bridge = CvBridge()
@@ -48,6 +55,8 @@ class DoorDiagnosticLogger(Node):
         self.verbose = verbose
         self.record_remapped = record_remapped
         self.path_topic = path_topic
+        self.depth_topic = depth_topic
+        self.active_depth_topic = None
 
         self.min_depth = 0.25
         self.max_depth = 10.0
@@ -178,7 +187,38 @@ class DoorDiagnosticLogger(Node):
         self.create_subscription(Marker, '/vis/lookahead_goal', self.carrot_cb, 10)
         self.create_subscription(PoseStamped, '/goal_pose', self.goal_pose_cb, 10)
         self.create_subscription(Twist, '/cmd_vel', self.cmd_cb, 10)
-        self.create_subscription(Image, '/zed/zed_node/depth/depth_registered', self.depth_cb, 10)
+
+        # 深度相机自动识别与多话题兼容监听 (支持 RealSense D435i / ZED 2i，采用 sensor_data 兼容 Best Effort/Reliable)
+        sensor_qos = qos_profile_sensor_data
+
+        if not self.depth_topic or self.depth_topic in ('auto', 'default'):
+            # 自动模式：同时订阅 RealSense 与 ZED 话题，哪路有数据就录哪路
+            self.create_subscription(
+                Image, REALSENSE_DEPTH_TOPIC,
+                lambda m: self.depth_cb(m, REALSENSE_DEPTH_TOPIC),
+                sensor_qos
+            )
+            self.create_subscription(
+                Image, REALSENSE_DEPTH_TOPIC_ALT,
+                lambda m: self.depth_cb(m, REALSENSE_DEPTH_TOPIC_ALT),
+                sensor_qos
+            )
+            self.create_subscription(
+                Image, REALSENSE_DEPTH_TOPIC_ALIGNED,
+                lambda m: self.depth_cb(m, REALSENSE_DEPTH_TOPIC_ALIGNED),
+                sensor_qos
+            )
+            self.create_subscription(
+                Image, ZED_DEPTH_TOPIC,
+                lambda m: self.depth_cb(m, ZED_DEPTH_TOPIC),
+                sensor_qos
+            )
+        else:
+            self.create_subscription(
+                Image, self.depth_topic,
+                lambda m: self.depth_cb(m, self.depth_topic),
+                sensor_qos
+            )
 
         # 订阅新增楼梯与路径诊断 topic
         self.create_subscription(Bool, '/nav/is_descending_stairs', self.stair_state_cb, 10)
@@ -314,8 +354,21 @@ class DoorDiagnosticLogger(Node):
         except Exception:
             pass
 
-    def depth_cb(self, msg: Image):
+    def depth_cb(self, msg: Image, topic_name: str = ''):
         self.depth_msg_count += 1
+        if topic_name:
+            self.active_depth_topic = topic_name
+        elif not self.active_depth_topic:
+            self.active_depth_topic = self.depth_topic
+
+        # 根据当前活跃相机动态微调量程 (RealSense 与 ZED 均允许探测至 10.0m，避免远距走廊截断为空洞)
+        if self.active_depth_topic and ('camera' in self.active_depth_topic or 'realsense' in self.active_depth_topic):
+            self.min_depth = 0.15
+            self.max_depth = 10.0
+        else:
+            self.min_depth = 0.25
+            self.max_depth = 10.0
+
         now = time.time()
 
         # 频率节流：按设定 rate (默认 5Hz) 采样
@@ -323,35 +376,41 @@ class DoorDiagnosticLogger(Node):
         if (now - self.last_record_epoch) < min_interval:
             return
 
-        # 必须等待里程计就绪，获取自身基准
-        if (self.robot_pos is None and self.robot_pos_map is None) or \
-           ((now - self.last_odom_time > 3.0) and (now - self.last_loc_odom_time > 3.0)):
-            return
-
         # 动态坐标系对齐判断：
         # /vis/lookahead_goal 与规划路径基于 'map' 坐标系。
-        # 只要 /loc/robo/odom 在 3 秒内有消息更新，基准位姿严格优先采用 map 坐标系；否则回退至 /lio/robo/odom
-        # 彻底消除因 odom 与 map 坐标系相差数米导致的虚假"目标在身后(BEHIND!)"
-        use_map_frame = (
-            self.robot_pos_map is not None
-            and (now - self.last_loc_odom_time <= 3.0)
-        )
+        # 只要 /loc/robo/odom 在 3 秒内有消息更新，基准位姿严格优先采用 map 坐标系；其次 /lio/robo/odom
+        has_loc_odom = (self.robot_pos_map is not None) and (now - self.last_loc_odom_time <= 3.0)
+        has_lio_odom = (self.robot_pos is not None) and (now - self.last_odom_time <= 3.0)
+        use_map_frame = has_loc_odom
 
-        if use_map_frame:
+        if has_loc_odom:
             curr_robot_pos = self.robot_pos_map
             curr_robot_yaw = self.robot_yaw_map
             curr_robot_yaw_deg = self.robot_yaw_deg_map
             curr_robot_roll = self.robot_roll_map
             curr_robot_pitch = self.robot_pitch_map
-        else:
+        elif has_lio_odom:
             curr_robot_pos = self.robot_pos
             curr_robot_yaw = self.robot_yaw
             curr_robot_yaw_deg = self.robot_yaw_deg
             curr_robot_roll = self.robot_roll
             curr_robot_pitch = self.robot_pitch
+        else:
+            # 允许在无里程计阶段正常记录纯视觉与走廊净空数据，基准设为原点
+            curr_robot_pos = np.zeros(3, dtype=float)
+            curr_robot_yaw = 0.0
+            curr_robot_yaw_deg = 0.0
+            curr_robot_roll = 0.0
+            curr_robot_pitch = 0.0
 
         try:
             depth_raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            if getattr(msg, 'encoding', '') in ('16UC1', 'mono16') or depth_raw.dtype == np.uint16:
+                depth_raw = depth_raw.astype(np.float32) / 1000.0
+            elif getattr(msg, 'encoding', '') in ('32FC1',):
+                depth_raw = depth_raw.astype(np.float32)
+            else:
+                depth_raw = depth_raw.astype(np.float32)
         except Exception as e:
             self.get_logger().warn(f'cv_bridge 深度图转换失败: {e}', throttle_duration_sec=2.0)
             return
@@ -719,18 +778,23 @@ class DoorDiagnosticLogger(Node):
         """定期输出传感器就绪状态"""
         now = time.time()
         if self.frame_idx == 0:
-            odom_ok = (self.robot_pos is not None) and (now - self.last_odom_time < 3.0)
+            odom_ok = ((self.robot_pos is not None and now - self.last_odom_time < 3.0) or
+                       (self.robot_pos_map is not None and now - self.last_loc_odom_time < 3.0))
             depth_ok = (self.depth_msg_count > 0)
             carrot_ok = (self.carrot_pos is not None) and (now - self.last_carrot_time < 3.0)
             stair_topic_active = (now - self.last_stair_time < 5.0)
 
-            odom_str = "\033[92mOK\033[0m" if odom_ok else "\033[91m等待中 (/lio/robo/odom)\033[0m"
-            depth_str = "\033[92mOK\033[0m" if depth_ok else "\033[91m等待中 (/zed/.../depth_registered)\033[0m"
+            odom_str = "\033[92mOK\033[0m" if odom_ok else "\033[93m等待中 (/loc|lio/.../odom)\033[0m"
+            if depth_ok:
+                depth_str = f"\033[92mOK ({self.active_depth_topic or '已连接'})\033[0m"
+            else:
+                target_topics = self.depth_topic if self.depth_topic not in ('auto', 'default', '') else 'RealSense/ZED'
+                depth_str = f"\033[91m等待中 ({target_topics})\033[0m"
             carrot_str = "\033[92mOK\033[0m" if carrot_ok else "\033[93m等待中 (/vis/lookahead_goal)\033[0m"
             stair_str = "\033[92mOK\033[0m" if stair_topic_active else "\033[90m未激活 (/nav/is_descending_stairs)\033[0m"
 
             sys.stdout.write(
-                f"\r[就绪检查] 里程计=[{odom_str}], 深度图=[{depth_str}], 目标点=[{carrot_str}], 楼梯通道=[{stair_str}]   "
+                f"\r[就绪检查] 深度图=[{depth_str}], 里程计=[{odom_str}], 目标点=[{carrot_str}], 楼梯通道=[{stair_str}]   "
             )
             sys.stdout.flush()
 
@@ -839,8 +903,17 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true', help='开启逐帧详细打印')
     parser.add_argument('--no-remapped', action='store_true', help='关闭重映射深度图保存')
     parser.add_argument('--path-topic', type=str, default='/global_path', help='全局规划路径 Topic (默认 /global_path)')
+    parser.add_argument('--depth-topic', type=str, default='auto', help='深度图像 Topic (默认 auto: 自动监听 RealSense 和 ZED)')
+    parser.add_argument('--realsense', '--d435', action='store_true', help='显式使用 RealSense 深度话题 (/camera/camera/aligned_depth_to_color/image_raw)')
+    parser.add_argument('--zed', action='store_true', help='显式使用 ZED 深度话题 (/zed/zed_node/depth/depth_registered)')
 
     parsed, unknown = parser.parse_known_args()
+
+    depth_topic = parsed.depth_topic
+    if parsed.realsense:
+        depth_topic = REALSENSE_DEPTH_TOPIC
+    elif parsed.zed:
+        depth_topic = ZED_DEPTH_TOPIC
 
     rclpy.init()
     node = DoorDiagnosticLogger(
@@ -849,7 +922,8 @@ def main():
         record_rate=parsed.rate,
         verbose=parsed.verbose,
         record_remapped=not parsed.no_remapped,
-        path_topic=parsed.path_topic
+        path_topic=parsed.path_topic,
+        depth_topic=depth_topic
     )
 
     try:

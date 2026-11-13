@@ -4,9 +4,16 @@
 DEFAULT_CONTROL_FREQUENCY = 5.0  # Hz
 DEFAULT_MIN_DEPTH = 0.25  # meters
 DEFAULT_MAX_DEPTH = 10.0  # meters
-ARRIVE_GOAL_THRESHOLD = 0.75  # meters
+ARRIVE_GOAL_THRESHOLD = 0.20  # meters (aligned with SEGMENT_ARRIVE_THRESHOLD = 0.20)
 NEAR_GOAL_THRESHOLD_MULTIPLIER = 2.0
 JOYSTICK_TIMEOUT = 15.0  # seconds
+
+# Depth camera parameters
+REALSENSE_DEPTH_TOPIC = '/camera/camera/depth/image_rect_raw'
+REALSENSE_DEPTH_TOPIC_ALIGNED = '/camera/camera/aligned_depth_to_color/image_raw'
+ZED_DEPTH_TOPIC = '/zed/zed_node/depth/depth_registered'
+DEFAULT_DEPTH_TOPIC = REALSENSE_DEPTH_TOPIC  # 默认使用 RealSense 原生深度图
+DEFAULT_MIN_DEPTH = 0.15  # meters (RealSense 盲区为 0.15m)
 
 # Model parameters
 POLICY_SCALE = [1.5, 1.0, 1.0]  # [linear_x, linear_y, angular_z]

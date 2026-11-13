@@ -7,7 +7,7 @@
 
 set -e
 
-ROBOT_IP="${1:-${ROBOT_IP:-10.3.42.161}}"
+ROBOT_IP="${1:-${ROBOT_IP:-192.168.31.186}}"
 ROBOT_USER="agile"
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

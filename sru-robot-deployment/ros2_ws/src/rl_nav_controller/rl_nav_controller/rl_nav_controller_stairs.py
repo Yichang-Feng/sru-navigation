@@ -9,9 +9,18 @@ Inherits from NavigationPolicyNode (rl_nav_controller_adaptive.py) and seamlessl
 """
 
 import os
+import sys
 import math
 import argparse
 import numpy as np
+
+# Ensure package root (.../src/rl_nav_controller) is in sys.path and remove inner module dir to avoid package shadowing
+_cur_dir = os.path.dirname(os.path.abspath(__file__))
+_pkg_root = os.path.dirname(_cur_dir)
+if _pkg_root not in sys.path:
+    sys.path.insert(0, _pkg_root)
+if _cur_dir in sys.path:
+    sys.path.remove(_cur_dir)
 
 import rclpy
 from rclpy.node import Node
@@ -30,7 +39,7 @@ try:
 except ImportError:
     from rl_nav_controller_adaptive import NavigationPolicyNode, NavState
     from stairs_depth_processor import StairsSlopeGate, StairsDepthRemapper
-    from rl_nav_controller import constants
+    import constants
 
 
 class StairsNavigationPolicyNode(NavigationPolicyNode):
@@ -729,13 +738,25 @@ def main(args=None):
     parser.add_argument('--heading-max-vel', type=float, default=None, help='Heading alignment maximum rotational velocity (default: 0.45 rad/s)')
     parser.add_argument('--heading-min-vel', type=float, default=None, help='Heading alignment minimum rotational velocity (default: 0.15 rad/s)')
 
+    # Depth camera CLI arguments
+    parser.add_argument('--depth-topic', type=str, default=None, help='Depth camera topic (e.g. /camera/camera/aligned_depth_to_color/image_raw or /zed/zed_node/depth/depth_registered)')
+    parser.add_argument('--min-depth', type=float, default=None, help='Minimum valid depth in meters')
+    parser.add_argument('--max-depth', type=float, default=None, help='Maximum valid depth in meters')
+
     known_args, ros_args = parser.parse_known_args(args=args)
     rclpy.init(args=ros_args)
     use_sim = known_args.sim
 
     pkg_name = 'rl_nav_controller'
-    pkg_path = get_package_share_directory(pkg_name)
+    try:
+        pkg_path = get_package_share_directory(pkg_name)
+    except Exception:
+        pkg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
     preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_encoder.onnx')
+    if not os.path.isfile(preprocess_model_path):
+        pkg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        preprocess_model_path = os.path.join(pkg_path, 'deployment_policies', 'vae_encoder.onnx')
 
     if known_args.policy_path:
         policy_model_path = os.path.expanduser(known_args.policy_path)
@@ -798,6 +819,17 @@ def main(args=None):
         node.enable_stairs_mode = known_args.enable_stairs_mode
     if known_args.enable_stair_remapping is not None:
         node.enable_stair_remapping = known_args.enable_stair_remapping
+
+    # Configure depth camera overrides
+    if known_args.depth_topic:
+        node.depth_topic = known_args.depth_topic
+        if hasattr(node, 'depth_subscriber') and node.depth_subscriber is not None:
+            node.destroy_subscription(node.depth_subscriber)
+        node.depth_subscriber = node.create_subscription(Image, node.depth_topic, node.depth_callback, 10)
+    if known_args.min_depth is not None:
+        node.min_depth = known_args.min_depth
+    if known_args.max_depth is not None:
+        node.max_depth = known_args.max_depth
     if known_args.stair_lookahead is not None:
         node.stair_lookahead_dist = known_args.stair_lookahead
     if known_args.stair_up_lookahead is not None:
