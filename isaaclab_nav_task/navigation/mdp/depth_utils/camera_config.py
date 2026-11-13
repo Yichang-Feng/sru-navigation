@@ -88,12 +88,27 @@ ODIN1_CAMERA_CONFIG = CameraConfig(
 )
 """Configuration for Odin1 LiDAR-aligned depth (used with Go2)."""
 
+# -----------------------------------------------------------------------------
+# Intel RealSense D435 / D435i
+# -----------------------------------------------------------------------------
+REALSENSE_D435_CAMERA_CONFIG = CameraConfig(
+    focal_length=35.0,
+    baseline=0.05,
+    min_depth=0.15,
+    max_depth=4.0,
+    resolution=(64, 40),
+    depth_encoder_path=_get_encoder_path("vae_pretrain_new.pth"),
+)
+"""Configuration for Intel RealSense D435 / D435i camera."""
+
 # Robot-to-camera mapping
 ROBOT_CAMERA_CONFIGS = {
     "b2w": ZEDX_CAMERA_CONFIG,
     "aow_d": ZEDX_CAMERA_CONFIG,
     "go2": ODIN1_CAMERA_CONFIG,
     "go2w": ZEDX_CAMERA_CONFIG,
+    "go2w_d435": REALSENSE_D435_CAMERA_CONFIG,
+    "realsense_d435": REALSENSE_D435_CAMERA_CONFIG,
 }
 """Dictionary mapping robot names to their camera configurations."""
 
