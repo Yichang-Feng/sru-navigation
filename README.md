@@ -2,7 +2,7 @@
 
 > **本目录定位**：存放所有在 Unitree Go2W 真实机器人（双 Jetson 架构）上运行的 ROS 2 工作空间、驱动、节点、配置与启动脚本。  
 > **机载对应目标**：背部高层主脑（NVIDIA Jetson Orin DevKit，IP: `192.168.123.111` / `10.3.42.161`，用户: `agile`）。  
-> **前置必读**：请先阅读 [GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) 了解硬件接线、网络拓扑与两机通信。
+> **前置必读**：请先阅读 [GO2W_DEPLOYMENT_GUIDE.md](docs/GO2W_DEPLOYMENT_GUIDE.md) 了解硬件接线、网络拓扑与两机通信。
 
 ---
 
@@ -21,7 +21,6 @@ sru-robot-deployment/
 │   │   │   │   ├── rl_nav_controller_adaptive.py (自适应前瞻变体)
 │   │   │   │   ├── rl_nav_controller_stairs.py   (楼梯穿越变体)
 │   │   │   │   ├── adaptive_path_tracker.py      (自适应前瞻胡萝卜点算法)
-│   │   │   │   ├── path_tracker.py               (分段路径跟踪器)
 │   │   │   │   ├── stairs_depth_processor.py     (台阶高程提取处理器)
 │   │   │   │   └── constants.py                  (遥控器手柄与状态常量)
 │   │   │   ├── launch/                           (启动 launch 文件)
@@ -67,15 +66,11 @@ sru-robot-deployment/
 │   └── stop_local_sru.sh          ← 停止脚本
 │
 ├── docs/                          ← 📖 实机部署技术与交接文档
-│   ├── GO2W_ROBOT_DEPLOYMENT_HANDOVER.md        (🔑 硬件拓扑与开机排坑手册)
-│   ├── GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md        (完整纯命令行执行指南)
-│   ├── GO2W_NAVIGATION_SYSTEM_GUIDE.md          (局部 SRU 导航系统详解)
-│   ├── GLOBAL_NAV_INTEGRATION_SPEC.md           (全局规划 + SRU 联合导航规范)
-│   ├── GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md (两种导航模式架构对比)
-│   ├── GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md(终点朝向控制交接)
-│   ├── GO2W_DOOR_NAVIGATION_HANDOVER.md         (窄门通过与前瞻自适应)
+│   ├── GO2W_DEPLOYMENT_GUIDE.md           (🔑 拓扑 + 安全 + 一键启动 + 排错)
+│   ├── GO2W_NAVIGATION_SYSTEM_GUIDE.md    (局部 SRU 导航系统详解，v3.3)
+│   ├── GLOBAL_NAV_INTERFACE.md            (模式对比 + 话题/状态机/参数接口)
 │   ├── GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md (相机深度图参数调校)
-│   └── GO2W_SIM_HANDOFF.md                      (仿真接入工程交接)
+│   └── GO2W_SIM_HANDOFF.md                (仿真接入工程交接)
 │
 ├── diagnostics/                   ← 🩺 诊断与实机记录工具
 │   ├── door_diagnostic_logger.py  (窄门通过热力图与特征诊断记录工具)
@@ -92,7 +87,7 @@ sru-robot-deployment/
 | 工作空间 | 机载路径 | 主要节点与职责 | 启动命令 |
 |:---|:---|:---|:---|
 | **`bridge_ws`** | `agile@111:~/bridge_ws` | **硬件驱动与底层中枢**：<br>1. `unitree_bridge`：监听 `/cmd_vel` 转换下发 DDS 给底盘。<br>2. `livox_ros_driver2`：发布雷达点云。<br>3. `zed_wrapper`：发布深度图与相机里程计。<br>4. `super_lio`：雷达全局重定位。 | `cd ~/bridge_ws && ./bridge.sh`<br>`ros2 launch super_lio relocation.py` |
-| **`go2w_nav_ros2_ws`** | `agile@111:~/go2w_nav_ros2_ws` | **高层自主避障与导航栈**：<br>1. `rl_nav_controller`：运行 SRU ONNX 模型进行端到端局部避障。<br>2. `global_planner`：基于雷达先验地图生成全局全局路径 `/path`。<br>3. `path_follow`：计算路径前瞻萝卜点并送入强化学习策略。 | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh` |
+| **`go2w_nav_ros2_ws`** | `agile@111:~/go2w_nav_ros2_ws` | **高层自主避障与导航栈**：<br>1. `rl_nav_controller`：运行 SRU ONNX 模型进行端到端局部避障。<br>2. `global_planner`：基于雷达先验地图生成全局全局路径 `/global_path`。<br>3. `path_follow`：计算路径前瞻萝卜点并送入强化学习策略。 | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh` |
 
 ---
 
@@ -116,8 +111,8 @@ scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_polic
 
 | 领域 | 核心文档 |
 |:---|:---|
-| **开机与通信** | [GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) |
-| **命令行操作** | [GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md) |
-| **架构与联合模式** | [GLOBAL_NAV_INTEGRATION_SPEC.md](docs/GLOBAL_NAV_INTEGRATION_SPEC.md)<br>[GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md](docs/GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md) |
+| **开机与通信** | [GO2W_DEPLOYMENT_GUIDE.md](docs/GO2W_DEPLOYMENT_GUIDE.md) |
+| **命令行操作** | [GO2W_DEPLOYMENT_GUIDE.md](docs/GO2W_DEPLOYMENT_GUIDE.md) |
+| **架构与联合模式** | [GLOBAL_NAV_INTERFACE.md](docs/GLOBAL_NAV_INTERFACE.md) |
 | **相机调优** | [GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) |
-| **场景适配** | [GO2W_DOOR_NAVIGATION_HANDOVER.md](docs/GO2W_DOOR_NAVIGATION_HANDOVER.md)<br>[GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md](docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md) |
+| **场景适配** | [GO2W_SIM_HANDOFF.md](docs/GO2W_SIM_HANDOFF.md) |

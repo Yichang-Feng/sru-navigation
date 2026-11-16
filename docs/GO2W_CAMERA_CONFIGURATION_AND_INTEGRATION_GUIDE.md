@@ -261,10 +261,10 @@ bash start_nav.sh --zed
 在机器人或机载终端执行专用检测工具，实时查看深度有效覆盖率、最远探测距离及走廊穿透能力：
 ```bash
 # 默认监听 RealSense 原生深度图 (/camera/camera/depth/image_rect_raw)
-python3 scripts/test_realsense_max_distance.py
+python3 diagnostics/test_realsense_max_distance.py
 
 # 显式测试 ZED 深度图
-python3 scripts/test_realsense_max_distance.py --topic /zed/zed_node/depth/depth_registered
+python3 diagnostics/test_realsense_max_distance.py --topic /zed/zed_node/depth/depth_registered
 ```
 
 ### 3. 一键同步部署至真机
