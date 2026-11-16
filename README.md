@@ -55,16 +55,6 @@ sru-navigation-learning/
 │   ├── play_go2w.sh               #   加载权重仿真回放（GUI 可视化）
 │   └── logs/rsl_rl/               #   训练日志与权重 checkpoint
 │
-├── sru-robot-deployment/          # 🤖 实机部署代码（含两大完整机载工作空间）
-│   ├── go2w_nav_ros2_ws/          #   对应机载 ~/go2w_nav_ros2_ws/ (高层导航栈)
-│   │   └── src/                   #     含 rl_nav_controller, global_planner, path_follow 等
-│   ├── bridge_ws/                 #   对应机载 ~/bridge_ws/ (底盘通信与传感器驱动)
-│   │   └── src/                   #     含 unitree_bridge, zed-ros2-wrapper, super_lio 等
-│   ├── scripts/                   #   一键同步/部署脚本 (sync_to_go2w_nav.sh 等)
-│   ├── docs/                      #   实机部署文档集合 (软硬件拓扑/排坑指南)
-│   ├── diagnostics/               #   诊断与测试工具 (door_diagnostic_logger 等)
-│   └── README.md                  #   机载路径完全映射对照表
-│
 ├── scripts/                       # 🔧 开发侧工具脚本（不推送至机器狗）
 │   ├── export_onnx.py             #   训练后导出 ONNX 模型
 │   ├── export_loco_to_onnx.py     #   步态策略导出
@@ -78,10 +68,9 @@ sru-navigation-learning/
 │
 ├── docs/                          # 📚 训练与算法文档
 │   ├── go2w_nav_refactor_plan.md  #   Go2W 5-Phase 训练全指南（必读）
-│   ├── NAVIGATION_TRAINING_DESIGN.md  # 导航任务设计原理
-│   ├── SRU_NAVIGATION_EXPLAINED.md    # SRU 架构详解
-│   ├── ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md # 自适应前瞻设计
-│   ├── TENSORBOARD_METRICS_GUIDE.md   # 训练指标解读
+│   ├── NAVIGATION_MDP.md          #   架构总览 + MDP 设计原理
+│   ├── TRAINING_MONITORING.md     #   命令速查 + 训练指标解读
+│   ├── ADAPTIVE_LOOKAHEAD.md      #   双因子自适应前瞻（含窄门）
 │   └── B2W_HEADING_CONTROL_HANDOVER.md # 航向控制（B2W 参考）
 │
 ├── config/                        # 📋 训练配置
@@ -134,7 +123,7 @@ cd IsaacLab
 
 # 方式 A：自动化全流程（Phase 1→5 自动切换，推荐）
 conda activate isaaclab
-python train_go2w_curriculum.py --algo ppo --num_envs 1024 --headless
+./train_go2w_curriculum.sh --algo ppo --num_envs 1024 --headless
 
 # 方式 B：手动分 Phase 控制（适合中途介入调参）
 ./train_go2w_scratch.sh      # Phase 1 从头开始
@@ -157,7 +146,7 @@ python train_go2w_curriculum.py --algo ppo --num_envs 1024 --headless
 # Tensorboard（推荐）
 tensorboard --logdir IsaacLab/logs/rsl_rl/go2w_navigation_ppo
 
-# 指标解读参考 docs/TENSORBOARD_METRICS_GUIDE.md
+# 指标解读参考 docs/TRAINING_MONITORING.md
 ```
 
 ---
@@ -170,12 +159,12 @@ tensorboard --logdir IsaacLab/logs/rsl_rl/go2w_navigation_ppo
 # 导出标准导航策略（含 VAE 编码器）
 python scripts/export_onnx.py \
   --checkpoint IsaacLab/logs/rsl_rl/go2w_navigation_ppo/model_best.pt \
-  --output sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
+  --output ../sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
 
 # 验证导出结果
 python -c "
 import onnxruntime as ort
-sess = ort.InferenceSession('sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx')
+sess = ort.InferenceSession('../sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx')
 print('输入:', [i.name for i in sess.get_inputs()])
 print('输出:', [o.name for o in sess.get_outputs()])
 print('✓ ONNX 导出验证通过')
@@ -186,8 +175,8 @@ print('✓ ONNX 导出验证通过')
 
 ## 三、实机部署
 
-> **详细部署文档**：[sru-robot-deployment/README.md](sru-robot-deployment/README.md)（含机载目录路径完全对照表）  
-> **必读交接文档**：[sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md)
+> **详细部署文档**：见独立仓库 `sru-robot-deployment` 的 `README.md`（含机载目录路径完全对照表）  
+> **必读交接文档**：见 `sru-robot-deployment/docs/GO2W_DEPLOYMENT_GUIDE.md`
 
 ### 机器狗网络拓扑
 
@@ -216,10 +205,10 @@ print('✓ ONNX 导出验证通过')
 ```bash
 # 在开发机，仓库根目录执行
 # （保持 WiFi 连接至 Agile-Robot-Guest 或机载 192.168.123.x 网段）
-bash sru-robot-deployment/scripts/sync_to_go2w_nav.sh
+bash ../sru-robot-deployment/scripts/sync_to_go2w_nav.sh
 
 # 同时推送 ONNX 模型权重
-scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
+scp ../sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
     agile@10.3.42.161:~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/
 ```
 
@@ -283,7 +272,7 @@ ros2 topic pub /goal_pose geometry_msgs/PoseStamped "..." --once
 ```
 
 **全局导航数据流详解**：  
-参见 [sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md](sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md)
+参见独立仓库 `sru-robot-deployment` 的 `docs/GLOBAL_NAV_INTERFACE.md`
 
 ---
 
@@ -304,24 +293,23 @@ ros2 topic pub /goal_pose geometry_msgs/PoseStamped "..." --once
 | 文档 | 内容 |
 |:---|:---|
 | [docs/go2w_nav_refactor_plan.md](docs/go2w_nav_refactor_plan.md) | 🔑 **Go2W 5-Phase 训练完全指南**（超参数、课程设计、调参建议） |
-| [docs/NAVIGATION_TRAINING_DESIGN.md](docs/NAVIGATION_TRAINING_DESIGN.md) | 导航任务 MDP 设计原理（奖励函数、终止条件） |
-| [docs/SRU_NAVIGATION_EXPLAINED.md](docs/SRU_NAVIGATION_EXPLAINED.md) | SRU 架构通俗讲解 |
-| [docs/ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md](docs/ADAPTIVE_LOOKAHEAD_NAVIGATION_DESIGN.md) | 自适应前瞻萝卜点算法设计 |
-| [docs/TENSORBOARD_METRICS_GUIDE.md](docs/TENSORBOARD_METRICS_GUIDE.md) | 训练曲线与指标解读 |
+| [docs/NAVIGATION_MDP.md](docs/NAVIGATION_MDP.md) | 架构总览 + MDP 设计原理（奖励、终止、观测） |
+| [docs/TRAINING_MONITORING.md](docs/TRAINING_MONITORING.md) | 命令速查 + 训练曲线与指标解读 |
+| [docs/ADAPTIVE_LOOKAHEAD.md](docs/ADAPTIVE_LOOKAHEAD.md) | 双因子自适应前瞻（含窄门） |
 | [docs/B2W_HEADING_CONTROL_HANDOVER.md](docs/B2W_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制（B2W 参考实现） |
 
 ### 实机部署
+> 部署代码与文档已迁至独立仓库 `sru-robot-deployment`（与本仓库同级目录，或 https://github.com/leggedrobotics/sru-robot-deployment）。
+> 机载路径对照表、拓扑、启动、排坑等见该仓库的 `README.md` 与 `docs/GO2W_DEPLOYMENT_GUIDE.md`。
+
 | 文档 | 内容 |
 |:---|:---|
-| [sru-robot-deployment/README.md](sru-robot-deployment/README.md) | 🔑 **部署目录总说明 + 机载路径对照表** |
-| [sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md](sru-robot-deployment/docs/GO2W_ROBOT_DEPLOYMENT_HANDOVER.md) | 机器狗双 Jetson 拓扑、网络、传感器、实机启动全流程 |
-| [sru-robot-deployment/docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md](sru-robot-deployment/docs/GO2W_ROS2_CLI_DEPLOYMENT_GUIDE.md) | 完整纯命令行操作手册 |
-| [sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md](sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md) | 局部 SRU 导航系统详解 |
-| [sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md](sru-robot-deployment/docs/GLOBAL_NAV_INTEGRATION_SPEC.md) | 全局 + 局部联合导航技术规范 |
-| [sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md](sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md) | Go2W 仿真接入工程文档 |
-| [sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) | 相机配置指南 |
-| [sru-robot-deployment/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md](sru-robot-deployment/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md) | 门区穿越功能详解 |
-| [sru-robot-deployment/docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md](sru-robot-deployment/docs/GO2W_TERMINAL_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制功能交接 |
+| [../sru-robot-deployment/README.md](../sru-robot-deployment/README.md) | 🔑 **部署目录总说明 + 机载路径对照表** |
+| [../sru-robot-deployment/docs/GO2W_DEPLOYMENT_GUIDE.md](../sru-robot-deployment/docs/GO2W_DEPLOYMENT_GUIDE.md) | 机器狗双 Jetson 拓扑、网络、传感器、实机启动全流程 |
+| [../sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md](../sru-robot-deployment/docs/GO2W_NAVIGATION_SYSTEM_GUIDE.md) | 局部 SRU 导航系统详解 |
+| [../sru-robot-deployment/docs/GLOBAL_NAV_INTERFACE.md](../sru-robot-deployment/docs/GLOBAL_NAV_INTERFACE.md) | 全局 + 局部联合导航技术规范 |
+| [../sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](../sru-robot-deployment/docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) | 相机配置指南 |
+| [../sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md](../sru-robot-deployment/docs/GO2W_SIM_HANDOFF.md) | Go2W 仿真接入工程文档 |
 
 ---
 
