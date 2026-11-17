@@ -1,8 +1,10 @@
-# VLN 相对 base 目标点接入规范（复用 `/goal_pose`）
+# VLN 相对 base 目标点接入规范
 
 > 适用对象：上层 VLN（Vision-Language-Navigation）模块开发者。
-> 目标：VLN 只需在**现有** `/goal_pose` 话题上发布“相对机器人 base 的位置点”，SRU 导航节点负责跟随；VLN 到点后停止发点，SRU 自动刹停。
-> 不新增任何输入话题、不新增桥接节点。
+> 目标：上层为 VLN 模型，本模块**只做点的跟随**——VLN 在**现有** `/goal_pose` 话题上发布“相对机器人 base 的位置点”，SRU 负责跟随；VLN 判定到点后停止发点，SRU 完成最后一个点（10 cm 内）后刹停并等待下一个点。
+> 不新增任何输入话题、不新增桥接节点、不走 RViz 下点；里程计照常使用（Super-LIO `/lio/robo/odom`，无地图依赖）。
+> 平台：Unitree Go2W（Jetson Orin DevKit / Ubuntu 22.04 / ROS 2 Humble）｜深度相机：**Intel RealSense D435i**（本项目不涉及 ZED）
+> 机载接入：用户 `agile`；机器人自带 WiFi `GL-MT3000-ef3-5G` → **192.168.123.111**，`agile_guest` WiFi → **10.3.42.161**（SSH / NoMachine 任选）
 
 ---
 
@@ -128,31 +130,95 @@ p_world = R(robot_yaw/pitch/roll) * p_base + p_robot
 
 ---
 
-## 5. 启动
+## 5. 拉取、编译与部署
 
-### 5.1 单独启动局部 SRU（VLN 模式）
+### 5.1 需要部署的文件
 
-```bash
-cd ~/sru-robot-deployment   # 或开发机上的 scripts 目录
-./scripts/start_local_sru.sh --vln
-```
+| 仓库内路径 | 机载目标位置 | 说明 |
+|:---|:---|:---|
+| `go2w_nav_ros2_ws/src/rl_nav_controller/`（整包） | `~/go2w_nav_ros2_ws/src/rl_nav_controller/` | 控制器源码 + `deployment_policies/` 下随仓库提交的 ONNX 模型（`vae_encoder.onnx`、`nav_policy.onnx`） |
+| `sru_ws/start_local_sru.sh`、`stop_local_sru.sh`、`realsense_nav_override.yaml` | `~/sru_ws/` | 一键启动/停止脚本与 RealSense 相机覆盖配置（仓库内 `sru_ws/` 即机载 `~/sru_ws/` 的规范副本） |
 
-`--vln` 会：
+> 模型说明：默认策略模型为 **`nav_policy.onnx`**（随仓库提交于 `deployment_policies/`），`colcon build` 时由 `setup.py` 拷入 install share，控制器启动时默认加载；`vae_encoder.onnx` 启动时无条件加载，缺失则节点起不来。
 
-- 给 SRU 传入 `goal_frame_mode=base`、`base_goal_arrive_threshold=0.10`，无新点看门狗保持关闭；
-- **不启动 RViz**（VLN 场景无需可视化）；
-- 启动脚本优先加载 `~/go2w_nav_ros2_ws` 中同步后的控制器源码，并检查其中是否包含 `goal_frame_mode` 支持，避免误加载 `~/sru_ws` 下的旧副本。
+### 5.2 拉取代码
 
-也可以手工指定：
+团队元仓库（vcstool，含 `agile_nav.repos`）中本仓库位于 `src/sru-navigation`，跟踪分支 `sru-robot-deployment`：
 
 ```bash
-./scripts/start_local_sru.sh --goal-mode base --goal-timeout 1.5
+cd ~/agile_nav_ws                 # 团队元仓库目录（含 agile_nav.repos）
+vcs pull src                      # 更新全部子仓库；只更新本仓库可执行: cd src/sru-navigation && git pull
 ```
 
-`--goal-mode auto`（默认）时，VLN 必须在消息里写 `frame_id: base_link`；
-如果 VLN 不方便设置 `frame_id`，使用 `--vln` 强制 base 模式即可。
+### 5.3 同步到机载并编译
 
-### 5.2 全局导航栈 / 其他启动方式
+在开发机上（拉取完成后）执行：
+
+```bash
+WS=~/agile_nav_ws                 # 团队元仓库目录
+REPO=$WS/src/sru-navigation
+ROBOT_IP=192.168.123.111          # 机器人自带 WiFi (GL-MT3000-ef3-5G)；走 agile_guest 时用 10.3.42.161
+
+# 1) 同步控制器整包（含 deployment_policies/ 下的 ONNX 模型）
+rsync -avz $REPO/go2w_nav_ros2_ws/src/rl_nav_controller/ \
+    agile@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/
+
+# 2) 同步启动脚本与相机配置
+rsync -avz $REPO/sru_ws/start_local_sru.sh $REPO/sru_ws/stop_local_sru.sh \
+    $REPO/sru_ws/realsense_nav_override.yaml agile@$ROBOT_IP:~/sru_ws/
+ssh agile@$ROBOT_IP "chmod +x ~/sru_ws/start_local_sru.sh ~/sru_ws/stop_local_sru.sh"
+
+# 3) 机载编译（模型随包装入 install share）
+ssh agile@$ROBOT_IP "source /opt/ros/humble/setup.bash && cd ~/go2w_nav_ros2_ws && \
+    colcon build --packages-select rl_nav_controller --symlink-install"
+```
+
+> 若车端是全新机器（尚无 `~/go2w_nav_ros2_ws`）：先把仓库里 `go2w_nav_ros2_ws/src/` 下的包全部同步到机载工作空间并整体 `colcon build`，再执行上述第 3 步。
+
+## 6. 启动（机载端）
+
+### 6.1 一键启动局部 SRU（默认即 VLN 模式）
+
+```bash
+cd ~/sru_ws
+./start_local_sru.sh          # 默认 = --vln：base 相对点 + 关 RViz + 10 cm 到点，RealSense D435i
+```
+
+停止：启动终端 `Ctrl+C`（自动安全清理全部节点），或另开终端执行 `./stop_local_sru.sh`。
+
+手动发一个测试点（表示“从当前位置向前走 1.5 m，进入 10 cm 内即停”）：
+
+```bash
+ros2 topic pub /goal_pose geometry_msgs/PoseStamped \
+  "{header: {frame_id: 'world'}, pose: {position: {x: 1.5, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}" --once
+```
+
+> VLN（base）模式下 `frame_id` 被忽略，任意值均可；VLN 判定到点后停止发点即可。
+
+### 6.2 start_local_sru.sh 命令行可调参数
+
+| 参数 | 说明 | 默认 |
+|:---|:---|:---|
+| `--vln` | VLN 模式：所有 `/goal_pose` 一律按 base 相对点处理，并关闭 RViz。**默认行为已等价于该参数**，保留用于显式声明 | 默认开 |
+| `--realsense` / `--d435` / `--d435i` | 使用 RealSense D435i 深度相机（本项目唯一相机） | 默认 |
+| `--zed` / `--camera <type>` | 切换相机类型（本项目不涉及 ZED，仅兼容保留） | realsense |
+| `--rviz` / `--no-rviz` | 手动打开/关闭 RViz 可视化 | 关 |
+| `--goal-mode <auto\|base\|world>` | 目标帧模式：`auto`=按 frame_id 判别；`base`=全部按相对点（VLN 用法）；`world`=全部按世界绝对点（旧行为） | `base` |
+| `--goal-timeout <秒>` | “无新点”看门狗：RUNNING 下超过该时长未收到新点 → 刹停；**0 = 关闭**（只靠 10 cm 位置到点） | `0.0`（关） |
+| `--goal-arrive <米>` | VLN 相对点的位置到点半径 | `0.10` m |
+| 透传参数 | 其余参数原样透传给 `rl_nav_controller`，如 `--policy-path <路径>`（自定义 ONNX 策略模型；不指定时用仓库自带 `nav_policy.onnx`）、`--odom-topic`、`--blocked-timeout` 等 | — |
+
+常用组合：
+
+```bash
+./start_local_sru.sh                                   # 标准 VLN 部署（默认行为）
+./start_local_sru.sh --goal-mode auto --rviz           # 恢复旧行为：RViz 2D Nav Goal 下点调试
+./start_local_sru.sh --goal-timeout 1.5                 # 额外开启“停发即刹停”看门狗
+./start_local_sru.sh --goal-arrive 0.15                 # 到点半径调为 15 cm
+./start_local_sru.sh --policy-path /path/to/model.onnx  # 指定自定义策略模型
+```
+
+### 6.3 全局导航栈 / 其他启动方式
 
 若使用 `start_nav.sh`、自适应 launch 或 stairs 版本，直接给节点加参数：
 
@@ -165,7 +231,7 @@ ros2 run rl_nav_controller rl_nav_controller_adaptive ... \
 
 ---
 
-## 6. VLN 侧发布示例（Python）
+## 7. VLN 侧发布示例（Python）
 
 ```python
 import rclpy
@@ -200,7 +266,7 @@ class VlnGoalPublisher(Node):
 
 ---
 
-## 7. 调试
+## 8. 调试
 
 ```bash
 # 观察 SRU 是否收到相对点并转换
@@ -226,7 +292,7 @@ VLN point reached: waiting for the next base-frame goal.
 
 ---
 
-## 8. 注意事项
+## 9. 注意事项
 
 1. **里程计必须先就绪**：收到相对点前若 `/lio/robo/odom` 尚无数据，该点会被忽略（日志会提示）。
 2. **超时参数要匹配 VLN 发点频率**，否则会出现“点间隔过长 → 误刹停”或“到点后停得太晚”。
@@ -235,78 +301,3 @@ VLN point reached: waiting for the next base-frame goal.
 5. **到点判定完全交给 VLN**：SRU 不再因距离近而自行结束任务，避免 VLN 与 SRU 两套到点标准互相打架。
 
 ---
-
-## 9. 验证记录
-
-可回归的单元测试：`go2w_nav_ros2_ws/src/rl_nav_controller/test/`（VLN 目标逻辑、PathSegmentTracker API、B 暂停/恢复路径）
-
-```bash
-cd go2w_nav_ros2_ws/src/rl_nav_controller
-source /opt/ros/humble/setup.bash
-python3 -m pytest test/ -q   # 19 passed
-```
-
-覆盖：
-
-- base/world 帧识别与模式切换；
-- base→world 位置/朝向转换（含 yaw=90° 场景）；
-- 距离钳位；
-- 无里程计保护；
-- 10 cm 位置到点判定；
-- 可选超时看门狗刹停 / 新点恢复 / 超时关闭；
-- 同一点按新位姿重新锁定（无去重）；
-- 绝对点透传与退出 VLN 模式；
-- 手动暂停锁存不被连续发点覆盖。
-
-另：`colcon build --packages-select rl_nav_controller` 编译通过。
-
----
-
-## 10. 常见问题
-
-### Q1：日志报 `Target frame_id "base_link" does not match odometry frame_id "world"`
-
-这表示机载运行的还是**旧版控制器**（旧版只接受 `world` / `map` / `odom` / 空帧）。
-新版启动时会打印一行：
-
-```
-Goal input: /goal_pose | frame_mode=base | base_frames=['base', 'base_link', ...] | stream_timeout=2.00s | ...
-```
-
-排查：
-
-1. 看 `start_local_sru.sh` 输出的 `直接加载最新策略源码: <路径>`，确认加载的是刚同步的文件
-   （脚本现在优先 `~/go2w_nav_ros2_ws`，并会跳过不含 `goal_frame_mode` 的旧副本）；
-2. 如果使用 `ros2 run rl_nav_controller ...`，必须在机载端重新 `colcon build --packages-select rl_nav_controller`；
-3. `~/sru_ws/src/sru-robot-deployment/...` 与 `~/sru_ws/src/rl_nav_controller/...` 下的旧副本也要更新
-   （新版 `sync_to_go2w_nav.sh` 已自动同步存在的旧副本目录）。
-
-### Q2：`--vln` 启动后没有 RViz
-
-这是预期行为：`--vln` 会关闭 RViz。如需强制打开，在命令中追加 `--rviz`（参数顺序在后即可生效）。
-
-### Q3：不让 VLN 设置 `frame_id` 怎么办？
-
-用 `--vln`（等价于 `goal_frame_mode=base`），此时所有 `/goal_pose` 消息都按 base 相对点解释，`frame_id` 内容被忽略。
-
-### Q4：为什么之前刹停后整个节点/脚本会退出？
-
-旧版 `main()` 用 `except (KeyboardInterrupt, Exception): pass` 吞掉了 `rclpy.spin()` 抛出的异常，随后执行 `finally` 关机，表现为“自己退出”。现已：
-
-- 拆分异常处理，非 Ctrl+C 异常会打印完整 traceback；
-- 看门狗回调整体加异常保护，单个定时器异常不再终止导航；
-- 默认关闭“无新点”看门狗，停止由 10 cm 位置判定完成（不再触发该路径）。
-
-如果仍然退出，请把终端里的 traceback 发来，可据此定位具体回调。
-
-
-### Q5：行进中按 B 或触发 STOPPED 后节点退出
-
-根因：单独 SRU 使用的 `path_tracker.py` 中 `PathSegmentTracker` 缺少 `has_path()`；
-而 `motion_enable_callback`、`joy_callback` 的 B 分支以及 `generate_cmd_vel` 的
-STOPPED 分支都会调用它。一旦状态切到 `STOPPED`，下一次深度回调即抛
-`AttributeError`，`rclpy.spin` 退出，表现为按 B 就退出（无新点看门狗刹停后退出也是同一原因）。
-
-修复：`path_tracker.py` 已补齐 `has_path()`、`get_terminal_pose()`、
-`realign_to_robot()`，并让 `set_path()` 接受 `frame_id`；`sync_to_go2w_nav.sh`
-现在会同步 `path_tracker.py` / `adaptive_path_tracker.py` / `stairs_depth_processor.py`。

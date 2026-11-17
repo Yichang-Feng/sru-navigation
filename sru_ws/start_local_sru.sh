@@ -23,6 +23,7 @@
 #   ./start_local_sru.sh --goal-mode auto --rviz   # 恢复旧行为：按 frame_id 判别目标帧 + RViz 下点
 #   ./start_local_sru.sh --goal-timeout 1.5        # 开启"无新点刹停"看门狗（默认关闭）
 #   ./start_local_sru.sh --goal-arrive 0.15        # 指定 VLN 相对点的位置到点半径 (默认 10cm)
+#   ./start_local_sru.sh --policy-path /path/to/model.onnx  # 指定自定义策略模型（默认用仓库自带 deployment_policies/nav_policy.onnx）
 #
 # 退出机制：按 Ctrl+C 自动安全关闭并终止所有后台进程，或在另一终端执行 ./stop_local_sru.sh
 # ==============================================================================
@@ -443,9 +444,10 @@ for arg in "${FORWARD_ARGS[@]}"; do
     fi
 done
 
-if [ "$HAS_CUSTOM_POLICY" = "false" ] && [ -f "$HOME/sru_ws/model/Odin_nav_policy.onnx" ]; then
-    echo -e "${GREEN}[✓] 未显式指定模型，自动载入默认自定义模型: $HOME/sru_ws/model/Odin_nav_policy.onnx${NC}"
-    POLICY_MODEL_ARG=("--policy-path" "$HOME/sru_ws/model/Odin_nav_policy.onnx")
+# 默认策略模型：仓库自带 deployment_policies/nav_policy.onnx（colcon build 时由 setup.py 装入 install share，控制器默认加载）。
+# 需要其他模型时显式传 --policy-path <路径>（经 FORWARD_ARGS 透传给节点）。
+if [ "$HAS_CUSTOM_POLICY" = "false" ]; then
+    echo -e "${CYAN}[i] 未指定 --policy-path，使用默认策略模型: deployment_policies/nav_policy.onnx${NC}"
 fi
 
 # 优先直接使用源码执行，彻底规避 colcon build setuptools entry_points 缓存脱节

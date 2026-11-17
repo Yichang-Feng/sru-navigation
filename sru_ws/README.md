@@ -1,7 +1,7 @@
-# sru_ws — 狗机 `~/sru_ws/` 工作空间级文件快照
+# sru_ws — 机载 `~/sru_ws/` 的规范副本
 
 > 对应机载路径：`agile@192.168.123.111:~/sru_ws/`（局部 SRU 模式工作空间）。
-> 本目录只保存**工作空间根目录**的文件，用于核对狗上实际运行的脚本与配置。
+> 本目录保存**工作空间根目录**的文件（启动脚本 / 相机配置 / RViz / 测试与基准脚本），是部署到狗上的权威来源。
 
 ## 为什么只有这些文件
 
@@ -19,15 +19,13 @@
 
 因此这里**不镜像** `src/`（那是本仓库自己的旧克隆）、`model/`、`map/`、`build/`、`install/`、`log/`。
 
-## 与 `../scripts/` 的关系
+## 文件定位
 
-- `../scripts/` 是**同步源**：`scripts/sync_to_go2w_nav.sh` 会把 `scripts/start_local_sru.sh`、
-  `scripts/stop_local_sru.sh`、`scripts/realsense_nav_override.yaml` 推到狗上的 `~/sru_ws/`。
-- 本目录是**狗上快照**，用于核对"狗上现在到底是什么"。需要改行为时改 `../scripts/` 再同步，
-  不要只改这里，否则又会和狗上不一致。
-- 目前 `start_local_sru.sh` / `stop_local_sru.sh` / `realsense_nav_override.yaml` 与 `../scripts/` 一致；
-  `zed_nav_override.yaml` 是局部模式专用的一份，与 `rl_nav_controller/config/zed_nav_override.yaml` 不同，
-  以 `start_local_sru.sh --zed` 实际加载的那份为准。
+- 本目录是机载 `~/sru_ws/` 的**规范副本**：`start_local_sru.sh` / `stop_local_sru.sh` /
+  `realsense_nav_override.yaml` 以这里为准，部署时直接同步到机载（拉取/编译/部署步骤见
+  [docs/VLN_BASE_FRAME_GOALS.md](../docs/VLN_BASE_FRAME_GOALS.md) 第 5 节）。
+- `zed_nav_override.yaml` 是局部模式专用的一份，与 `rl_nav_controller/config/zed_nav_override.yaml` 不同；
+  本项目默认 RealSense、不涉及 ZED。
 
 ## 启动
 

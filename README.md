@@ -18,7 +18,7 @@ sru-robot-deployment/
 │   │   ├── rl_nav_controller/     ← 核心 SRU 局部强化学习避障与前瞻跟踪节点 (Python)
 │   │   │   ├── rl_nav_controller/ (主控 / 自适应 / 楼梯三个变体 + tracker + utils)
 │   │   │   ├── launch/  config/  scripts/
-│   │   │   ├── deployment_policies/  (ONNX 模型目录；*.onnx/*.pt 不进 git)
+│   │   │   ├── deployment_policies/  (ONNX 模型目录；vae_encoder.onnx / nav_policy.onnx 随仓库提交)
 │   │   │   └── setup.py  package.xml
 │   │   ├── global_planner/        ← 全局路径规划 C++ 包 (可通行点云上的 Dijkstra/A*)
 │   │   │   └── map/trav_map.pcd   (先验可通行地图；*.pcd 不进 git，需单独 rsync)
@@ -64,22 +64,12 @@ sru-robot-deployment/
 │   ├── complex.sh                 ← colcon 一键编译
 │   └── zed_nav_override.yaml      ← 相机覆盖参数
 │
-├── scripts/                       ← 🛠️ 远程一键部署/同步/控制脚本
-│   ├── sync_to_go2w_nav.sh        ← 一键将本地修改推送到机载 ~/go2w_nav_ros2_ws/
-│   ├── sync_adaptive_to_go2w.sh   ← 推送自适应变体至机器狗
-│   ├── sync_stairs_to_go2w.sh     ← 推送楼梯变体至机器狗
-│   ├── sync_to_robot.sh           ← 底层一键同步脚本
-│   ├── start_nav.sh               ← 本地备用启动脚本
-│   ├── start_nav_custom.sh        ← 自定义前瞻距离启动脚本
-│   ├── start_nav_adaptive.sh      ← 自适应前瞻启动脚本
-│   ├── start_nav_stairs.sh        ← 楼梯场景启动脚本
-│   └── stop_local_sru.sh          ← 停止脚本
-│
 ├── docs/                          ← 📖 实机部署技术与交接文档
 │   ├── GO2W_DEPLOYMENT_GUIDE.md           (🔑 拓扑 + 安全 + 一键启动 + 排错)
 │   ├── GO2W_NAVIGATION_SYSTEM_GUIDE.md    (局部 SRU 导航系统详解，v3.3)
 │   ├── GLOBAL_NAV_INTERFACE.md            (模式对比 + 话题/状态机/参数接口)
 │   ├── GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md (相机深度图参数调校)
+│   ├── VLN_BASE_FRAME_GOALS.md            (🔑 局部 SRU × VLN 点跟随模块交接：接口 + 拉取/编译/部署 + 启动参数)
 │   └── GO2W_SIM_HANDOFF.md                (仿真接入工程交接)
 │
 ├── diagnostics/                   ← 🩺 诊断与实机记录工具
@@ -102,19 +92,30 @@ sru-robot-deployment/
 
 ---
 
-## 三、一键推送代码到机器狗
+## 三、拉取、同步与编译（局部 SRU / VLN 模式）
 
-在开发机上执行以下命令，将本地修改一键同步到机载：
+在开发机上执行以下命令，将本仓库代码（含 ONNX 模型）同步到机载并编译：
 
 ```bash
-# 1. 确保连入机器狗网络（如 WiFi: Agile-Robot-Guest）
-# 2. 推送导航工作空间代码：
-bash sru-robot-deployment/scripts/sync_to_go2w_nav.sh 10.3.42.161
+WS=~/agile_nav_ws                 # 团队元仓库目录（vcs pull 后本仓库位于 $WS/src/sru-navigation）
+REPO=$WS/src/sru-navigation
+ROBOT_IP=192.168.123.111          # 机器人自带 WiFi (GL-MT3000-ef3-5G)；agile_guest 用 10.3.42.161
 
-# 3. 推送训练好的最新 ONNX 模型权重：
-scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx \
-    agile@10.3.42.161:~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/
+# 1) 同步控制器整包（含 deployment_policies/ 下随仓库提交的 ONNX 模型）
+rsync -avz $REPO/go2w_nav_ros2_ws/src/rl_nav_controller/ \
+    agile@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/
+
+# 2) 同步启动脚本与相机配置（sru_ws/ 即机载 ~/sru_ws/ 的规范副本）
+rsync -avz $REPO/sru_ws/start_local_sru.sh $REPO/sru_ws/stop_local_sru.sh \
+    $REPO/sru_ws/realsense_nav_override.yaml agile@$ROBOT_IP:~/sru_ws/
+
+# 3) 机载编译（模型随包装入 install share）
+ssh agile@$ROBOT_IP "source /opt/ros/humble/setup.bash && cd ~/go2w_nav_ros2_ws && \
+    colcon build --packages-select rl_nav_controller --symlink-install"
 ```
+
+机载启动：`cd ~/sru_ws && ./start_local_sru.sh`（默认即 VLN 模式）。完整步骤与参数说明见
+[VLN_BASE_FRAME_GOALS.md](docs/VLN_BASE_FRAME_GOALS.md) 第 5/6 节。
 
 ---
 
