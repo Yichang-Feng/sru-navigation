@@ -18,9 +18,11 @@
 #   [5] rl_nav_controller (SRU 强化学习端到端避障导航策略节点，单点到点判定 0.20m)
 #
 # 用法：
-#   ./start_local_sru.sh                 # 默认使用 RealSense D435/D435i 深度相机
-#   ./start_local_sru.sh --realsense     # 显式指定 RealSense
-#   ./start_local_sru.sh --zed           # 切换使用 Stereolabs ZED 2i 相机
+#   ./start_local_sru.sh                 # 默认即 VLN 模式（等价于 --vln）：base 相对点 + 关 RViz + 10cm 到点，RealSense 相机
+#   ./start_local_sru.sh --vln           # 显式声明 VLN 模式（与默认行为相同）
+#   ./start_local_sru.sh --goal-mode auto --rviz   # 恢复旧行为：按 frame_id 判别目标帧 + RViz 下点
+#   ./start_local_sru.sh --goal-timeout 1.5        # 开启"无新点刹停"看门狗（默认关闭）
+#   ./start_local_sru.sh --goal-arrive 0.15        # 指定 VLN 相对点的位置到点半径 (默认 10cm)
 #
 # 退出机制：按 Ctrl+C 自动安全关闭并终止所有后台进程，或在另一终端执行 ./stop_local_sru.sh
 # ==============================================================================
@@ -37,8 +39,16 @@ NC='\033[0m' # No Color
 
 # 命令行参数解析：默认使用 RealSense 相机
 CAMERA_TYPE="realsense"
-ENABLE_RVIZ="true"
+ENABLE_RVIZ="false"       # 默认关闭 RViz（VLN 部署不需要；--rviz 可打开）
 FORWARD_ARGS=()
+
+# VLN 相对 base 目标点模式 (见 docs/VLN_BASE_FRAME_GOALS.md)
+# auto: frame_id 为 base_link 等 base 帧时按相对点处理
+# base: 所有 /goal_pose 都按相对 base 点处理 (默认，等价于 --vln)
+# world: 全部按世界绝对点处理 (旧行为)
+GOAL_FRAME_MODE="base"
+GOAL_STREAM_TIMEOUT="0.0"     # 0 = 关闭“无新点刹停”看门狗，按位置到点
+BASE_GOAL_ARRIVE="0.10"       # VLN 相对点按位置到点的半径 (m)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -62,6 +72,24 @@ while [[ $# -gt 0 ]]; do
             ENABLE_RVIZ="false"
             shift
             ;;
+        --vln)
+            # 上层 VLN 直接向 /goal_pose 下发相对 base 的点；VLN 模式不启动 RViz
+            GOAL_FRAME_MODE="base"
+            ENABLE_RVIZ="false"
+            shift
+            ;;
+        --goal-mode)
+            GOAL_FRAME_MODE="$2"
+            shift 2
+            ;;
+        --goal-timeout)
+            GOAL_STREAM_TIMEOUT="$2"
+            shift 2
+            ;;
+        --goal-arrive)
+            BASE_GOAL_ARRIVE="$2"
+            shift 2
+            ;;
         *)
             FORWARD_ARGS+=("$1")
             shift
@@ -73,7 +101,10 @@ echo -e "${CYAN}================================================================
 echo -e "${CYAN}   Unitree Go2W 单独启动局部 SRU 避障导航系统 (Standalone Local Launch) ${NC}"
 echo -e "${CYAN}   感知相机: ${GREEN}${CAMERA_TYPE}${CYAN} (可通过 --zed 或 --realsense 切换)         ${NC}"
 echo -e "${CYAN}   控制对齐: ${GREEN}按 [B] 停止刹停，按 [A] 启动/恢复运动${CYAN}                  ${NC}"
-echo -e "${CYAN}   到点阈值: ${GREEN}0.20m (与全局导航统一)${CYAN}                                ${NC}"
+echo -e "${CYAN}   目标模式: ${GREEN}${GOAL_FRAME_MODE}${CYAN} (base=VLN 相对点，按位置 ${BASE_GOAL_ARRIVE}m 到点) ${NC}"
+echo -e "${CYAN}   无新点看门狗: ${GREEN}${GOAL_STREAM_TIMEOUT}s${CYAN} (0=关闭)${NC}"
+echo -e "${CYAN}   RViz 可视化: ${GREEN}${ENABLE_RVIZ}${CYAN} (--vln 模式默认关闭)${NC}"
+echo -e "${CYAN}   到点阈值: ${GREEN}0.20m (与全局导航统一；VLN 相对点由发点流决定到点)${CYAN}  ${NC}"
 echo -e "${CYAN}================================================================${NC}"
 
 # 1. 加载 ROS 2 及机载工程环境
@@ -419,19 +450,32 @@ fi
 
 # 优先直接使用源码执行，彻底规避 colcon build setuptools entry_points 缓存脱节
 CANDIDATE_SCRIPTS=(
+    # ~/go2w_nav_ros2_ws 是 sync_to_go2w_nav.sh 实际更新的工作空间，优先使用
+    "$HOME/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
     "$HOME/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
     "$HOME/sru_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
-    "$HOME/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
     "${SCRIPT_DIR}/../rl_nav_controller.py"
     "${SCRIPT_DIR}/rl_nav_controller.py"
 )
 SRC_SCRIPT=""
+FALLBACK_SCRIPT=""
 for s in "${CANDIDATE_SCRIPTS[@]}"; do
     if [ -f "$s" ]; then
-        SRC_SCRIPT="$s"
-        break
+        [ -z "$FALLBACK_SCRIPT" ] && FALLBACK_SCRIPT="$s"
+        # 优先选择包含 VLN base 相对点支持的版本，避免误加载旧副本
+        if grep -q "goal_frame_mode" "$s"; then
+            SRC_SCRIPT="$s"
+            break
+        fi
     fi
 done
+if [ -z "$SRC_SCRIPT" ] && [ -n "$FALLBACK_SCRIPT" ]; then
+    SRC_SCRIPT="$FALLBACK_SCRIPT"
+    if [ "$GOAL_FRAME_MODE" != "world" ]; then
+        echo -e "${RED}[!] 警告: 找到的控制器源码不包含 VLN base 目标支持: ${SRC_SCRIPT}${NC}"
+        echo -e "${RED}    运行中的代码可能是旧版本，请重新同步并在机载端 colcon build。${NC}"
+    fi
+fi
 
 if [ -n "$SRC_SCRIPT" ]; then
     SRC_PKG_DIR="$(dirname "$(dirname "$SRC_SCRIPT")")"
@@ -444,6 +488,9 @@ if [ -n "$SRC_SCRIPT" ]; then
       -p max_depth:=${CAMERA_MAX_DEPTH} \
       -p segment_arrive_threshold:=0.20 \
       -p arrive_goal_threshold:=0.20 \
+      -p goal_frame_mode:=${GOAL_FRAME_MODE} \
+      -p goal_stream_timeout:=${GOAL_STREAM_TIMEOUT} \
+      -p base_goal_arrive_threshold:=${BASE_GOAL_ARRIVE} \
       -r /dlio/odom_node/odom:=/lio/robo/odom \
       -r /path_manager/path_manager_ros/nav_vel:=/cmd_vel
     RET_CODE=$?
@@ -455,6 +502,9 @@ else
       -p max_depth:=${CAMERA_MAX_DEPTH} \
       -p segment_arrive_threshold:=0.20 \
       -p arrive_goal_threshold:=0.20 \
+      -p goal_frame_mode:=${GOAL_FRAME_MODE} \
+      -p goal_stream_timeout:=${GOAL_STREAM_TIMEOUT} \
+      -p base_goal_arrive_threshold:=${BASE_GOAL_ARRIVE} \
       -r /dlio/odom_node/odom:=/lio/robo/odom \
       -r /path_manager/path_manager_ros/nav_vel:=/cmd_vel
     RET_CODE=$?

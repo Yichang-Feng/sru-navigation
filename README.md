@@ -8,34 +8,44 @@
 
 ## 一、目录结构与机载路径完全对照表
 
-本目录完整集成了机器狗机载的**两大 ROS 2 工作空间**（`go2w_nav_ros2_ws` 与 `bridge_ws`）以及配套脚本与文档：
+本目录完整集成了机器狗机载的**两大 ROS 2 工作空间**（`go2w_nav_ros2_ws` 与 `bridge_ws`）、局部模式工作空间 `sru_ws` 的工作空间级文件，以及配套脚本与文档：
 
 ```
 sru-robot-deployment/
 │
-├── go2w_nav_ros2_ws/              ← 🚀 对应狗机机载 ~/go2w_nav_ros2_ws/ (高层导航栈)
+├── go2w_nav_ros2_ws/              ← 🚀 对应狗机机载 ~/go2w_nav_ros2_ws/ (高层导航栈，与狗上一致)
 │   ├── src/
-│   │   ├── rl_nav_controller/     ← 核心 SRU 局部强化学习避障与前瞻跟踪节点
-│   │   │   ├── rl_nav_controller/
-│   │   │   │   ├── rl_nav_controller.py          (标准主控节点)
-│   │   │   │   ├── rl_nav_controller_adaptive.py (自适应前瞻变体)
-│   │   │   │   ├── rl_nav_controller_stairs.py   (楼梯穿越变体)
-│   │   │   │   ├── adaptive_path_tracker.py      (自适应前瞻胡萝卜点算法)
-│   │   │   │   ├── stairs_depth_processor.py     (台阶高程提取处理器)
-│   │   │   │   └── constants.py                  (遥控器手柄与状态常量)
-│   │   │   ├── launch/                           (启动 launch 文件)
-│   │   │   ├── config/                           (ZED / RealSense 参数覆盖)
-│   │   │   ├── deployment_policies/              (ONNX 模型目录, 模型文件从训练导出)
-│   │   │   └── setup.py
-│   │   ├── global_planner/        ← 全局路径规划功能包 (Dijkstra / A* on 栅格地图)
-│   │   ├── local_planner/         ← 局部规划器功能包
-│   │   ├── path_follow/           ← 路径跟随与动态胡萝卜点提取节点
+│   │   ├── rl_nav_controller/     ← 核心 SRU 局部强化学习避障与前瞻跟踪节点 (Python)
+│   │   │   ├── rl_nav_controller/ (主控 / 自适应 / 楼梯三个变体 + tracker + utils)
+│   │   │   ├── launch/  config/  scripts/
+│   │   │   ├── deployment_policies/  (ONNX 模型目录；*.onnx/*.pt 不进 git)
+│   │   │   └── setup.py  package.xml
+│   │   ├── global_planner/        ← 全局路径规划 C++ 包 (可通行点云上的 Dijkstra/A*)
+│   │   │   └── map/trav_map.pcd   (先验可通行地图；*.pcd 不进 git，需单独 rsync)
+│   │   ├── local_planner/         ← 局部规划器 C++ 包 (B 样条轨迹优化)
+│   │   ├── path_follow/           ← 路径跟随与动态胡萝卜点 C++ 包
 │   │   ├── go2w_bridge/           ← 底盘通信与手柄控制接口包
-│   │   └── super_lio/             ← LiDAR 里程计与重定位配置包
-│   ├── start_nav.sh               ← 导航一键启动脚本
+│   │   ├── task_manager/          ← 任务/状态调度包
+│   │   ├── rviz_tools/            ← RViz 自定义目标点工具插件
+│   │   └── Super-LIO-ros2/        ← Super-LIO LiDAR 定位/建图源码
+│   │       └── src/super_lio/     (map_localization / relocation 节点, config, rviz, map)
+│   ├── start_nav.sh               ← 导航一键启动 (tmux 分屏)
+│   ├── start_nav_custom.sh        ← 自定义前瞻距离启动
+│   ├── start_nav_adaptive.sh      ← 自适应前瞻变体
+│   ├── start_nav_stairs.sh        ← 楼梯场景变体
 │   ├── stop_nav.sh                ← 导航停止脚本
-│   ├── rviz.rviz                  ← 导航监控 RViz 视角配置
-│   └── test.rviz
+│   ├── rviz.rviz / test.rviz      ← 导航监控 RViz 视角配置
+│   ├── door_diagnostic_logger.py  ← 窄门诊断记录工具
+│   └── GO2W_DOOR_NAVIGATION_HANDOVER.md
+│
+├── sru_ws/                        ← 🔁 对应狗机 ~/sru_ws/ 的工作空间级文件快照
+│   ├── start_local_sru.sh         ← 局部 SRU 模式启动脚本
+│   ├── stop_local_sru.sh
+│   ├── realsense_nav_override.yaml / zed_nav_override.yaml
+│   ├── local_sru.rviz             ← 局部模式预调 RViz
+│   ├── mock_global_nav_tester.py / test_*.py
+│   ├── benchmark/                 ← 性能基准套件
+│   └── README.md                  ← 快照说明 (狗上 src/sru-robot-deployment 是本仓库旧克隆)
 │
 ├── bridge_ws/                     ← 🔌 对应狗机机载 ~/bridge_ws/ (底盘通信与传感器驱动)
 │   ├── src/
@@ -87,7 +97,8 @@ sru-robot-deployment/
 | 工作空间 | 机载路径 | 主要节点与职责 | 启动命令 |
 |:---|:---|:---|:---|
 | **`bridge_ws`** | `agile@111:~/bridge_ws` | **硬件驱动与底层中枢**：<br>1. `unitree_bridge`：监听 `/cmd_vel` 转换下发 DDS 给底盘。<br>2. `livox_ros_driver2`：发布雷达点云。<br>3. `zed_wrapper`：发布深度图与相机里程计。<br>4. `super_lio`：雷达全局重定位。 | `cd ~/bridge_ws && ./bridge.sh`<br>`ros2 launch super_lio relocation.py` |
-| **`go2w_nav_ros2_ws`** | `agile@111:~/go2w_nav_ros2_ws` | **高层自主避障与导航栈**：<br>1. `rl_nav_controller`：运行 SRU ONNX 模型进行端到端局部避障。<br>2. `global_planner`：基于雷达先验地图生成全局全局路径 `/global_path`。<br>3. `path_follow`：计算路径前瞻萝卜点并送入强化学习策略。 | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh` |
+| **`go2w_nav_ros2_ws`** | `agile@111:~/go2w_nav_ros2_ws` | **高层自主避障与导航栈**：<br>1. `rl_nav_controller`：运行 SRU ONNX 模型进行端到端局部避障。<br>2. `global_planner`：基于先验可通行点云生成全局路径 `/global_path`（`map` 系）。<br>3. `path_follow`：计算路径前瞻萝卜点并送入强化学习策略。<br>4. `Super-LIO-ros2`：`map_localization.py` 发布 `map -> world` 与 `/loc/robo/odom`。 | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh`<br>首次定位须在 RViz 给 `2D Pose Estimate`（发 `/initialpose`），否则节点停在 `WAIT_INIT` |
+| **`sru_ws`** | `agile@111:~/sru_ws` | **局部 SRU 模式**：只跑底盘桥 + 雷达定位 + 相机 + `rl_nav_controller`，目标来自 RViz `/goal_pose`。其中 `src/sru-robot-deployment` 是本仓库在狗上的旧克隆。 | `cd ~/sru_ws && ./start_local_sru.sh` |
 
 ---
 
@@ -116,3 +127,4 @@ scp sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_polic
 | **架构与联合模式** | [GLOBAL_NAV_INTERFACE.md](docs/GLOBAL_NAV_INTERFACE.md) |
 | **相机调优** | [GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md](docs/GO2W_CAMERA_CONFIGURATION_AND_INTEGRATION_GUIDE.md) |
 | **场景适配** | [GO2W_SIM_HANDOFF.md](docs/GO2W_SIM_HANDOFF.md) |
+| **VLN 上层接入** | [VLN_BASE_FRAME_GOALS.md](docs/VLN_BASE_FRAME_GOALS.md) |

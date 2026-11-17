@@ -97,6 +97,12 @@ Thumbs.db
 **/deployment_policies/*.onnx
 **/deployment_policies/*.pt
 **/deployment_policies/*.pth
+
+# VLN 交接：默认脚本 (start_local_sru.sh) 实际加载的模型入库
+!go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/vae_encoder.onnx
+!go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy.onnx
 !**/deployment_policies/.gitkeep
 map_all.pcd
+# 点云地图与先验可通行地图体积大，按需在机载单独 rsync，不进 git
+*.pcd
 *.zip

@@ -71,7 +71,7 @@ def generate_launch_description():
     depth_topic_arg = DeclareLaunchArgument('depth_topic', default_value='/camera/camera/depth/image_rect_raw', description='Depth image topic')
     depth_topic = LaunchConfiguration('depth_topic')
 
-    min_depth_arg = DeclareLaunchArgument('min_depth', default_value='0.15', description='Min depth in meters')
+    min_depth_arg = DeclareLaunchArgument('min_depth', default_value='0.25', description='Min depth in meters')
     min_depth = LaunchConfiguration('min_depth')
 
     max_depth_arg = DeclareLaunchArgument('max_depth', default_value='10.0', description='Max depth in meters')

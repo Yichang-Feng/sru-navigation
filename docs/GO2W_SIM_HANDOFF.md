@@ -18,7 +18,7 @@ conda activate sru-learning
 ./isaaclab.sh -p source/isaaclab_nav_task/scripts/play.py \
     --task Isaac-Nav-PPO-Go2W-Play-v0 \
     --num_envs 1 \
-    --checkpoint /home/yichangfeng/sru-robot-deployment/rl_nav_controller/deployment_policies/nav_policy_new.pt
+    --checkpoint /home/yichangfeng/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy_new.pt
 ```
 
 ---
@@ -143,7 +143,7 @@ conda activate sru-learning
 ./isaaclab.sh -p source/isaaclab_nav_task/scripts/play.py \
     --task Isaac-Nav-PPO-Go2W-Play-v0 \
     --num_envs 1 \
-    --checkpoint /home/yichangfeng/sru-robot-deployment/rl_nav_controller/deployment_policies/nav_policy_new.pt
+    --checkpoint /home/yichangfeng/sru-robot-deployment/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/nav_policy_new.pt
 ```
 
 ### 验证标准：

@@ -48,7 +48,7 @@
 | 1 | 启动主脚本 | `~/sru_ws/start_local_sru.sh`（兼容软链接 `start_go2w_system.sh`） | 自动加载环境、拉起后台支撑节点、最后前台启动避障策略 |
 | 2 | 停止脚本 | `~/sru_ws/stop_local_sru.sh` | 向 `/motion_enabled` 发布 false 锁死底盘，终止所有后台节点 |
 | 3 | 底盘与手柄桥 | `~/sru_ws/src/go2w_bridge/launch/go2w_bridge.launch.py`（或 `~/go2w_nav_ros2_ws/...`） | 拉起 `cmd_vel_bridge` 与 `wireless_controller`：B 键发布 `/motion_enabled=False`，A 键发布 `True`；仅使能时转发 `/cmd_vel` |
-| 4 | 激光雷达与定位 | `livox_ros_driver2 msg_MID360_launch.py` & `super_lio map_localization.py` | 驱动 MID-360 与 Super-LIO 重定位，输出 `/lio/robo/odom` |
+| 4 | 激光雷达与定位 | `livox_ros_driver2 msg_MID360_launch.py` & `super_lio map_localization.py`（源码在 `Super-LIO-ros2/src/super_lio`） | 驱动 MID-360 与 Super-LIO 重定位；前端发 `/lio/robo/odom`（world 系），收到 `/initialpose` 进入 TRACKING 后再发 `/loc/robo/odom`（map 系） |
 | 5 | 深度相机感知 | `realsense2_camera rs_launch.py` 或 `zed_wrapper zed_camera.launch.py` | 输出原生深度图 |
 | 6 | 相机覆盖配置 | `~/sru_ws/realsense_nav_override.yaml` 或 `~/sru_ws/zed_nav_override.yaml` | 移动避障优化的相机配置（空/时/空洞滤波，关闭点云与 RGB） |
 | 7 | 相机静态 TF | `tf2_ros static_transform_publisher` | 发布 `base_link -> camera_link`（RealSense: `0.34, 0.0, 0.25`）水平外参 |
@@ -71,7 +71,7 @@
 | 1 | 全局启动主脚本 | `~/go2w_nav_ros2_ws/start_nav.sh` | 基于 tmux 动态分屏拉起多节点集群，按依赖顺序拉起驱动、SLAM、感知、全局规划与局部规划 |
 | 2 | 全局停止脚本 | `~/go2w_nav_ros2_ws/stop_nav.sh` | 发布零速制动并 `/motion_enabled: false`，发送 C-c 并关闭 tmux 会话 |
 | 3 | 雷达硬件驱动 | `livox_ros_driver2 msg_MID360_launch.py` | 独立后台驱动 MID-360 |
-| 4 | 激光里程计与重定位 | `super_lio map_localization.py` | Super-LIO 定位节点，发布 `/lio/robo/odom` 与 `map -> base_link` TF |
+| 4 | 激光里程计与重定位 | `super_lio map_localization.py` | Super-LIO 定位节点：前端发布 `/lio/robo/odom`；收到 `/initialpose` 初始化后发布 `/loc/robo/odom`（`frame_id: map`）与动态 `map -> world` TF。未给初始位姿时停在 `WAIT_INIT`，这两项输出都不存在 |
 | 5 | 深度相机节点 | `realsense2_camera rs_launch.py` 或 `zed_wrapper zed_camera.launch.py` | 后台运行深度相机节点 |
 | 6 | 底盘与手柄安全桥 | `go2w_bridge/launch/go2w_bridge.launch.py` | 运行 `go2w_cmd_vel_bridge` 与 `go2w_wireless_controller`（B 刹停、A 恢复） |
 | 7 | 全局规划器 | `global_planner/launch/global_planner.launch.py` | 基于 3D 点云栅格地图生成全局最优无碰撞路径，向 `/global_path` 逐段下发 |
@@ -303,8 +303,9 @@ stateDiagram-v2
 | 话题名称 (Topic) | 通信方向 | ROS 2 消息类型 | 频率 | 来源硬件 / 算法 | 字段要求与作用说明 |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | **`/lio/robo/odom`**<br/>（映射前：`/dlio/odom_node/odom`） | SLAM → 控制器（控制器订阅） | `nav_msgs/msg/Odometry` | 10Hz ~ 50Hz | Livox MID-360 雷达 + Super LIO 重定位算法 | **高频机身物理位姿与测速输入**。`pose.pose.position`：机器狗在世界坐标系中的实时坐标 [x,y,z]；`pose.pose.orientation`：空间姿态四元数 [w,x,y,z]；`twist.twist`：对地空间线速度与角速度。若未收到本话题，控制器将保持在 Waiting for robot position 状态，底盘不开闸 |
+| **`/loc/robo/odom`** | 地图定位 → 控制器（控制器额外订阅） | `nav_msgs/msg/Odometry` | 约 10Hz | `map_localization.py`（MapLoc） | **地图系（`map`）位姿**，`child_frame_id: base`。仅在收到 `/initialpose` 并进入 TRACKING 后发布；与 `/lio/robo/odom` 同时可用时，控制器在 `map` 系路径跟踪中优先使用它 |
 | **`/zed/zed_node/depth/depth_registered`** | 相机 → 控制器（控制器订阅） | `sensor_msgs/msg/Image` | 15Hz（恒定） | ZED 2i 双目立体深度相机 | **局部环境深度图输入**。编码格式 `32FC1`（单通道 32 位浮点，单位米）；分辨率经轻量化配置缩放后输入 VAE 编码器（有效深度感知范围 0.25m ~ 10.0m） |
-| **`/tf` & `/tf_static`** | 系统 TF 树 → 控制器（控制器监听） | `tf2_msgs/msg/TFMessage` | 持续广播 | `tf2_ros` 坐标变换树 | **坐标系自动对齐与标定**。相机水平外参：`base_link -> zed_camera_link` ([0.257, 0.0, 0.28, 0, 0, 0])；地图变换：若 Path 带有外层坐标系（如 `map`），自动查询 `target_frame <- source_frame` 进行三维坐标转换 |
+| **`/tf` & `/tf_static`** | 系统 TF 树 → 控制器（控制器监听） | `tf2_msgs/msg/TFMessage` | 持续广播 | `tf2_ros` 坐标变换树 | **坐标系自动对齐与标定**。相机水平外参：`base_link -> zed_camera_link` ([0.257, 0.0, 0.28, 0, 0, 0])；定位链路为 `map -> world`（`/initialpose` 初始化后由 MapLoc 动态发布）`-> base`（Super-LIO 前端发布）。`map` 不存在时 RViz 的 `Fixed Frame: map` 必然报错；局部模式的 `start_local_sru.sh` 会额外广播静态 `map -> world` 兜底 |
 | **`/rsl_joy`** | 手柄 → 控制器（控制器订阅） | `sensor_msgs/msg/Joy` | 50Hz | 机载蓝牙 / 2.4G 遥控手柄 | **安全人工接管与冗余微调**。手柄推杆可直接叠加微调速度，手柄指定按键可随时执行紧急 ABORT 切断 |
 
 ### 5.5 接口分类四：RViz 可视化与算法调试接口

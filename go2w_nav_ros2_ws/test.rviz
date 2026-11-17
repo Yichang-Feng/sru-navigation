@@ -11,8 +11,11 @@ Panels:
         - /PointCloud21/Topic1
         - /PointCloud21/Autocompute Value Bounds1
         - /Path1
+        - /TF1
+        - /TF1/Status1
         - /TF1/Frames1
         - /TF1/Tree1
+        - /TF1/Tree1/map1
       Splitter Ratio: 0.5
     Tree Height: 689
   - Class: rviz_common/Selection
@@ -77,7 +80,7 @@ Visualization Manager:
       Selectable: true
       Size (Pixels): 3
       Size (m): 0.10000000149011612
-      Style: Flat Squares
+      Style: Points
       Topic:
         Depth: 5
         Durability Policy: Transient Local
@@ -120,47 +123,34 @@ Visualization Manager:
       Enabled: true
       Frame Timeout: 15
       Frames:
-        All Enabled: true
+        All Enabled: false
         base:
           Value: true
         base_link:
-          Value: true
+          Value: false
+        camera_color_frame:
+          Value: false
+        camera_color_optical_frame:
+          Value: false
+        camera_depth_frame:
+          Value: false
+        camera_depth_optical_frame:
+          Value: false
+        camera_link:
+          Value: false
         imu:
-          Value: true
+          Value: false
         map:
-          Value: true
-        odom:
           Value: true
         world:
           Value: true
-        zed_camera_center:
-          Value: true
-        zed_camera_link:
-          Value: true
-        zed_left_camera_frame:
-          Value: true
-        zed_left_camera_frame_optical:
-          Value: true
-        zed_right_camera_frame:
-          Value: true
-        zed_right_camera_frame_optical:
-          Value: true
-      Marker Scale: 2
+      Marker Scale: 5
       Name: TF
       Show Arrows: false
       Show Axes: true
       Show Names: true
       Tree:
         map:
-          odom:
-            zed_camera_link:
-              zed_camera_center:
-                zed_left_camera_frame:
-                  zed_left_camera_frame_optical:
-                    {}
-                zed_right_camera_frame:
-                  zed_right_camera_frame_optical:
-                    {}
           world:
             base:
               {}
@@ -216,25 +206,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 28.49716567993164
+      Distance: 26.051300048828125
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -2.116788148880005
-        Y: 1.1255435943603516
-        Z: -0.3209432363510132
+        X: -2.1778604984283447
+        Y: 3.7716124057769775
+        Z: -0.3555707037448883
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8553979396820068
+      Pitch: 0.7553979158401489
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 6.103582859039307
+      Yaw: 0.03539752960205078
     Saved: ~
 Window Geometry:
   Displays:

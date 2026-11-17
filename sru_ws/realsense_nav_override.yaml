@@ -1,0 +1,41 @@
+# ==============================================================================
+# Unitree Go2W Intel RealSense D435/D435i 导航避障专属远距离与高密度配置
+# (realsense_nav_override.yaml)
+#
+# 核心优化目标：
+# 1. 远距探测最大化：关闭裁剪距离 (clip_distance: -1.0)，支持达 10.0m 远景感知
+# 2. 激光发射器全功率：emitter_enabled: 1, laser_power: 360.0 (最高功率打满室内红外散斑)
+# 3. 视觉预设高密度：visual_preset: 4 (High Density: 降低视差门限，填补远距离弱纹理空洞)
+# 4. 后处理滤波全开：结合 Spatial/Temporal/Hole Filling 彻底解决走廊黑色虚空误判悬崖问题
+# ==============================================================================
+
+/**:
+    ros__parameters:
+        depth_module:
+            emitter_enabled: 1
+            laser_power: 360.0
+            visual_preset: 4           # 4: High Density (高密度模式，极大减少空洞)
+            enable_auto_exposure: true
+            hdr_enabled: false
+
+        # 空间平滑滤波 (平滑表面高频视差噪点)
+        spatial_filter:
+            enable: true
+            filter_magnitude: 2
+            filter_smooth_alpha: 0.5
+            filter_smooth_delta: 20
+            holes_fill: 2
+
+        # 时间累积滤波 (跨帧融合静止走廊墙面与地面视差，大幅增强远景信噪比)
+        temporal_filter:
+            enable: true
+            filter_smooth_alpha: 0.4
+            filter_smooth_delta: 20
+            holes_fill: 3
+
+        # 空洞填平滤波 (将走廊无反射或微弱视差空洞平滑填补，避免策略判定为虚空断崖)
+        hole_filling_filter:
+            enable: true
+            holes_fill: 2              # 2: nearest
+
+        clip_distance: -1.0            # -1.0 表示禁用软件距离硬截断

@@ -32,20 +32,18 @@ if ! ping -c 1 -W 1 "$ROBOT_IP" > /dev/null 2>&1; then
     echo "    若网络正常但 ping 被机载防火墙禁用，将直接尝试 SSH/RSYNC 传输..."
 fi
 
-# 2. 检查本地源码存在性
-if [ ! -d "$SRC_PKG_DIR" ]; then
-    echo "[✗] 错误: 本地未找到 $SRC_PKG_DIR"
-    exit 1
-fi
+# 2. 仅同步本次改动涉及的文件（depth_fill_mode / V2）
+echo -e "\n[1/3] 同步本次改动文件（depth_fill_mode=nearest）..."
 
-# 3. 同步 rl_nav_controller 完整功能包
-echo -e "\n[1/3] 同步 rl_nav_controller 功能包（含模型权重、配置与启动文件）..."
-rsync -avz --progress \
-    --exclude='__pycache__' \
-    --exclude='*.pyc' \
-    --exclude='.git' \
-    --exclude='*.egg-info' \
-    "$SRC_PKG_DIR/" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/"
+# rl_nav_controller 核心与 adaptive（stairs 继承 adaptive，必须同步）
+scp "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py" \
+    "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
+scp "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py" \
+    "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py"
+
+# launch 参数
+scp "${LOCAL_WS}/src/rl_nav_controller/launch/rl_nav_controller.launch.py" \
+    "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/launch/rl_nav_controller.launch.py"
 
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -f "$WORKSPACE_DIR/rl_nav_controller.py" ]; then
@@ -57,15 +55,15 @@ fi
 if [ -f "$WORKSPACE_DIR/rl_nav_controller_stairs.py" ]; then
     scp "$WORKSPACE_DIR/rl_nav_controller_stairs.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py"
 fi
-if [ -f "$WORKSPACE_DIR/path_tracker.py" ]; then
-    scp "$WORKSPACE_DIR/path_tracker.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/path_tracker.py"
-fi
-if [ -f "$WORKSPACE_DIR/adaptive_path_tracker.py" ]; then
-    scp "$WORKSPACE_DIR/adaptive_path_tracker.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py"
-fi
-if [ -f "$WORKSPACE_DIR/stairs_depth_processor.py" ]; then
-    scp "$WORKSPACE_DIR/stairs_depth_processor.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/stairs_depth_processor.py"
-fi
+# 路径跟踪与台阶模块（workspace 源目录为准；B 暂停路径依赖 path_tracker.has_path 等 API）
+for MODULE in path_tracker.py adaptive_path_tracker.py stairs_depth_processor.py; do
+    SRC_MODULE="${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/${MODULE}"
+    if [ -f "$SRC_MODULE" ]; then
+        scp "$SRC_MODULE" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/${MODULE}"
+    elif [ -f "$WORKSPACE_DIR/${MODULE}" ]; then
+        scp "$WORKSPACE_DIR/${MODULE}" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/${MODULE}"
+    fi
+done
 if [ -f "$WORKSPACE_DIR/scripts/setup_rl_nav_controller.py" ]; then
     scp "$WORKSPACE_DIR/scripts/setup_rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/src/rl_nav_controller/setup.py"
 elif [ -f "${LOCAL_WS}/src/rl_nav_controller/setup.py" ]; then
@@ -95,16 +93,23 @@ scp "${LOCAL_WS}/stop_nav.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/stop_nav
 
 if [ -f "$WORKSPACE_DIR/scripts/start_nav_custom.sh" ]; then
     scp "$WORKSPACE_DIR/scripts/start_nav_custom.sh" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/start_nav_custom.sh"
-    ssh "$ROBOT_USER@$ROBOT_IP" "cd ~/go2w_nav_ros2_ws && ln -sf start_nav_custom.sh start_nav_carrot.sh && chmod +x start_nav_custom.sh"
+    ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/start_nav_custom.sh"
 fi
 
-if [ -f "$WORKSPACE_DIR/scripts/door_diagnostic_logger.py" ]; then
-    scp "$WORKSPACE_DIR/scripts/door_diagnostic_logger.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/door_diagnostic_logger.py"
+if [ -f "$WORKSPACE_DIR/diagnostics/door_diagnostic_logger.py" ]; then
+    scp "$WORKSPACE_DIR/diagnostics/door_diagnostic_logger.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/door_diagnostic_logger.py"
     ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/door_diagnostic_logger.py"
 fi
-if [ -f "$WORKSPACE_DIR/scripts/test_realsense_max_distance.py" ]; then
-    scp "$WORKSPACE_DIR/scripts/test_realsense_max_distance.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/test_realsense_max_distance.py"
+if [ -f "$WORKSPACE_DIR/diagnostics/test_realsense_max_distance.py" ]; then
+    scp "$WORKSPACE_DIR/diagnostics/test_realsense_max_distance.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/test_realsense_max_distance.py"
     ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/test_realsense_max_distance.py"
+fi
+if [ -f "$WORKSPACE_DIR/diagnostics/compare_camera_sessions.py" ]; then
+    scp "$WORKSPACE_DIR/diagnostics/compare_camera_sessions.py" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/compare_camera_sessions.py"
+    ssh "$ROBOT_USER@$ROBOT_IP" "chmod +x ~/go2w_nav_ros2_ws/compare_camera_sessions.py"
+fi
+if [ -f "$WORKSPACE_DIR/diagnostics/README.md" ]; then
+    scp "$WORKSPACE_DIR/diagnostics/README.md" "$ROBOT_USER@$ROBOT_IP:~/go2w_nav_ros2_ws/DOOR_DIAGNOSTIC_README.md" 2>/dev/null || true
 fi
 
 if [ -f "$WORKSPACE_DIR/docs/GO2W_DOOR_NAVIGATION_HANDOVER.md" ]; then
@@ -128,9 +133,25 @@ if [ -f "$WORKSPACE_DIR/scripts/stop_local_sru.sh" ]; then
     ssh "$ROBOT_USER@$ROBOT_IP" "cd ~/sru_ws && chmod +x stop_local_sru.sh && ln -sf stop_local_sru.sh stop_go2w_system.sh"
 fi
 ssh "$ROBOT_USER@$ROBOT_IP" "rm -f ~/sru_ws/start_go2w_map_nav.sh ~/sru_ws/go2w_local_nav.rviz ~/sru_ws/map/map.pcd 2>/dev/null || true"
-if [ -f "$WORKSPACE_DIR/rl_nav_controller.py" ]; then
-    scp "$WORKSPACE_DIR/rl_nav_controller.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py" 2>/dev/null || true
-fi
+
+# 同步控制器到机载 ~/sru_ws 下的旧副本目录（若存在），避免 start_local_sru.sh 误加载旧代码
+for REMOTE_PKG_DIR in \
+    "~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller" \
+    "~/sru_ws/src/rl_nav_controller/rl_nav_controller"; do
+    if ssh "$ROBOT_USER@$ROBOT_IP" "test -d $REMOTE_PKG_DIR" 2>/dev/null; then
+        scp "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py" \
+            "$ROBOT_USER@$ROBOT_IP:$REMOTE_PKG_DIR/rl_nav_controller.py"
+        scp "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py" \
+            "$ROBOT_USER@$ROBOT_IP:$REMOTE_PKG_DIR/rl_nav_controller_adaptive.py"
+        for MODULE in path_tracker.py adaptive_path_tracker.py; do
+            if [ -f "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/${MODULE}" ]; then
+                scp "${LOCAL_WS}/src/rl_nav_controller/rl_nav_controller/${MODULE}" \
+                    "$ROBOT_USER@$ROBOT_IP:$REMOTE_PKG_DIR/${MODULE}"
+            fi
+        done
+        echo "[✓] 已更新机载旧副本目录: $REMOTE_PKG_DIR"
+    fi
+done
 if [ -f "$WORKSPACE_DIR/scripts/constants.py" ]; then
     scp "$WORKSPACE_DIR/scripts/constants.py" "$ROBOT_USER@$ROBOT_IP:~/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/constants.py" 2>/dev/null || true
 fi

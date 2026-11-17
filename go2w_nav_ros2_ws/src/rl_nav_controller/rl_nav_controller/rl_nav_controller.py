@@ -41,48 +41,6 @@ from rl_nav_controller.visualization import VisualizationManager
 from rl_nav_controller.waypoint_manager import WaypointManager
 from rl_nav_controller.path_tracker import NavState, PathSegmentTracker, BlockedDetector
 
-# Polyfill missing methods on PathSegmentTracker if running with older path_tracker.py
-if not hasattr(PathSegmentTracker, 'has_path'):
-    PathSegmentTracker.has_path = lambda self: self.is_active()
-
-if not hasattr(PathSegmentTracker, 'get_terminal_pose'):
-    def _fallback_get_terminal_pose(self):
-        if not self.is_active() or len(self.points) == 0:
-            return None, None
-        return self.points[-1].tolist(), self.terminal_yaw
-    PathSegmentTracker.get_terminal_pose = _fallback_get_terminal_pose
-
-if not hasattr(PathSegmentTracker, 'realign_to_robot'):
-    def _fallback_realign_to_robot(self, robot_pos_xy):
-        if not self.is_active() or robot_pos_xy is None:
-            return 0.0
-        r_pos = np.array(robot_pos_xy[:2], dtype=np.float64)
-        best_dist_sq = float("inf")
-        best_progress = self.current_progress
-        best_seg = self.current_seg_idx
-        for i in range(len(self.points) - 1):
-            p1 = self.points[i][:2]
-            p2 = self.points[i + 1][:2]
-            v = p2 - p1
-            seg_len_sq = float(np.dot(v, v))
-            if seg_len_sq < 1e-8:
-                t = 0.0
-                proj = p1
-            else:
-                t = float(np.dot(r_pos - p1, v) / seg_len_sq)
-                t = max(0.0, min(1.0, t))
-                proj = p1 + t * v
-            d_sq = float(np.sum((r_pos - proj) ** 2))
-            if d_sq < best_dist_sq:
-                best_dist_sq = d_sq
-                seg_len = self.cum_dists[i + 1] - self.cum_dists[i]
-                best_progress = self.cum_dists[i] + t * seg_len
-                best_seg = i
-        self.current_seg_idx = best_seg
-        self.current_progress = best_progress
-        return self.current_progress
-    PathSegmentTracker.realign_to_robot = _fallback_realign_to_robot
-
 try:
     import tf2_ros
     import tf2_geometry_msgs
@@ -412,7 +370,6 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('auto_unlock_bridge', True)
         self.declare_parameter('lookahead_distance', getattr(constants, 'LOOKAHEAD_DISTANCE', 2.0))
         self.declare_parameter('segment_arrive_threshold', getattr(constants, 'SEGMENT_ARRIVE_THRESHOLD', 0.20))
-        self.declare_parameter('arrive_goal_threshold', getattr(constants, 'ARRIVE_GOAL_THRESHOLD', 0.20))
         self.declare_parameter('blocked_timeout', getattr(constants, 'BLOCKED_TIMEOUT', 4.0))
         self.declare_parameter('blocked_dist_threshold', getattr(constants, 'BLOCKED_DIST_THRESHOLD', 0.1))
         self.declare_parameter('blocked_vel_threshold', getattr(constants, 'BLOCKED_VEL_THRESHOLD', 0.1))
@@ -423,8 +380,15 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('report_failure', getattr(constants, 'REPORT_FAILURE', True))
         self.declare_parameter('path_frame_id', '')
         self.declare_parameter('depth_topic', getattr(constants, 'DEFAULT_DEPTH_TOPIC', '/camera/camera/depth/image_rect_raw'))
-        self.declare_parameter('min_depth', float(getattr(constants, 'DEFAULT_MIN_DEPTH', min_depth)))
-        self.declare_parameter('max_depth', float(getattr(constants, 'DEFAULT_MAX_DEPTH', max_depth)))
+        self.declare_parameter('min_depth', float(min_depth))
+        self.declare_parameter('max_depth', float(max_depth))
+
+        # VLN base-frame goal streaming (published on the existing /goal_pose topic)
+        self.declare_parameter('goal_frame_mode', 'auto')  # auto | base | world
+        self.declare_parameter('base_frame_ids', 'base,base_link,base_footprint,body,imu')
+        self.declare_parameter('goal_stream_timeout', 0.0)  # 0 disables the stale-goal watchdog
+        self.declare_parameter('base_goal_max_distance', 5.0)  # clamp for relative goals (m), 0 disables
+        self.declare_parameter('base_goal_arrive_threshold', 0.10)  # arrival radius for VLN points (m)
 
         # Terminal heading alignment parameters
         self.declare_parameter('enable_terminal_heading_align', getattr(constants, 'DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN', True))
@@ -449,7 +413,6 @@ class NavigationPolicyNode(Node):
         self.lookahead_distance = float(self.get_parameter('lookahead_distance').value)
         self.report_failure = bool(self.get_parameter('report_failure').value)
         self.segment_arrive_threshold = float(self.get_parameter('segment_arrive_threshold').value)
-        self.arrive_goal_threshold = float(self.get_parameter('arrive_goal_threshold').value)
         self.blocked_timeout = float(self.get_parameter('blocked_timeout').value)
         self.blocked_dist_threshold = float(self.get_parameter('blocked_dist_threshold').value)
         self.blocked_vel_threshold = float(self.get_parameter('blocked_vel_threshold').value)
@@ -461,6 +424,26 @@ class NavigationPolicyNode(Node):
         self.depth_topic = str(self.get_parameter('depth_topic').value).strip()
         self.min_depth = float(self.get_parameter('min_depth').value)
         self.max_depth = float(self.get_parameter('max_depth').value)
+
+        self.goal_frame_mode = str(self.get_parameter('goal_frame_mode').value).strip().lower()
+        if self.goal_frame_mode not in ('auto', 'base', 'world'):
+            self.get_logger().warn(
+                f"Unknown goal_frame_mode '{self.goal_frame_mode}', falling back to 'auto'.")
+            self.goal_frame_mode = 'auto'
+        self.base_frame_ids = {
+            fid.strip() for fid in str(self.get_parameter('base_frame_ids').value).split(',')
+            if fid.strip()
+        }
+        self.goal_stream_timeout = float(self.get_parameter('goal_stream_timeout').value)
+        self.base_goal_max_distance = float(self.get_parameter('base_goal_max_distance').value)
+        self.base_goal_arrive_threshold = float(self.get_parameter('base_goal_arrive_threshold').value)
+        self.get_logger().info(
+            f'Goal input: /goal_pose | frame_mode={self.goal_frame_mode} | '
+            f'base_frames={sorted(self.base_frame_ids)} | '
+            f'base_arrive={self.base_goal_arrive_threshold:.2f}m | '
+            f'stream_timeout={self.goal_stream_timeout:.2f}s | '
+            f'max_base_goal_dist={self.base_goal_max_distance:.2f}m'
+        )
 
         self.enable_terminal_heading_align = bool(self.get_parameter('enable_terminal_heading_align').value)
         self.terminal_heading_tol = float(self.get_parameter('terminal_heading_tol').value)
@@ -624,6 +607,11 @@ class NavigationPolicyNode(Node):
         self.prev_cmd = np.zeros(3)  # For low-pass filtering
         self.is_abort_goal = False
 
+        # VLN base-frame goal stream state
+        self.goal_is_relative = False   # True while following base-frame (VLN) goals
+        self.last_goal_rx_time = None   # wall-clock time of the latest base-frame goal
+        self.user_pause_latched = False  # True after B / motion-disable / mission pause
+
         # Terminal heading alignment state
         self.is_aligning_heading = False
         self.heading_align_target_yaw = None
@@ -662,6 +650,9 @@ class NavigationPolicyNode(Node):
 
         # 5Hz sensor watchdog timer (monitors ZED camera depth frames)
         self.create_timer(0.2, self.check_sensor_health)
+
+        # 10Hz VLN goal-stream watchdog: brake when no new base-frame goal arrives
+        self.create_timer(0.1, self.check_goal_stream_timeout)
 
         # Initial status broadcast: IDLE
         self.publish_status_message()
@@ -729,9 +720,6 @@ class NavigationPolicyNode(Node):
         # 8) Mark that odom is now available and auto unlock bridge
         if not self.odom_ready:
             self.odom_ready = True
-            self.get_logger().info(
-                '\033[92m' + f'[✓] Odometry ready on {self.odom_topic} (frame: {self.map_frame_id}). Starting depth processing.' + '\033[0m'
-            )
             if self.auto_unlock_bridge and not self.chassis_unlocked:
                 self.unlock_chassis()
 
@@ -814,16 +802,6 @@ class NavigationPolicyNode(Node):
             except Exception:
                 pass
 
-    def _has_active_path(self) -> bool:
-        """Safely check if an active path is available."""
-        if not hasattr(self, 'path_tracker') or self.path_tracker is None:
-            return False
-        if hasattr(self.path_tracker, 'has_path'):
-            return bool(self.path_tracker.has_path())
-        if hasattr(self.path_tracker, 'is_active'):
-            return bool(self.path_tracker.is_active())
-        return False
-
     def motion_enable_callback(self, msg: Bool):
         """Handle chassis motion enable/disable events from /motion_enabled.
 
@@ -833,6 +811,7 @@ class NavigationPolicyNode(Node):
         3. External safety monitor or bridge toggles motion enable.
         """
         enabled = bool(msg.data)
+        self.user_pause_latched = not enabled
 
         if not enabled:
             # Motion disabled (e.g. Unitree controller button B pressed): Transition to STOPPED
@@ -840,7 +819,7 @@ class NavigationPolicyNode(Node):
                 self.is_abort_goal = False
                 self.set_state(NavState.STOPPED, reason="Chassis motion disabled by remote B button (/motion_enabled=False)")
                 self._stop_robot()
-                if hasattr(self, 'blocked_detector') and self._has_active_path():
+                if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
                     self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
                 self.get_logger().warn(
                     '\033[93m[MotionGate] Chassis motion disabled: State set to STOPPED (cmd_vel=0, path retained in memory).\033[0m'
@@ -848,13 +827,13 @@ class NavigationPolicyNode(Node):
         else:
             # Motion enabled (e.g. Unitree controller button A pressed): If currently in STOPPED state and a valid path exists, resume RUNNING
             if self.state == NavState.STOPPED:
-                if self._has_active_path():
+                if hasattr(self, 'path_tracker') and self.path_tracker.has_path():
                     self.is_abort_goal = False
                     self.goal_reached_latched = False
                     tracking_frame = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
                     pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
                     pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
-                    if pos_check is not None and hasattr(self.path_tracker, 'realign_to_robot'):
+                    if pos_check is not None:
                         self.path_tracker.realign_to_robot(pos_check[:2])
                     if hasattr(self, 'blocked_detector'):
                         self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
@@ -862,19 +841,8 @@ class NavigationPolicyNode(Node):
                     self.get_logger().info(
                         '\033[92m[MotionGate] Chassis motion enabled: Resumed path tracking -> RUNNING!\033[0m'
                     )
-                elif self.target_pos_w is not None or self.last_target_pos is not None:
-                    if self.target_pos_w is None and self.last_target_pos is not None:
-                        self.target_pos_w = list(self.last_target_pos)
-                    self.is_abort_goal = False
-                    self.goal_reached_latched = False
-                    if hasattr(self, 'blocked_detector'):
-                        self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
-                    self.set_state(NavState.RUNNING, reason="Chassis motion resumed by remote A button (Single Goal) (/motion_enabled=True)")
-                    self.get_logger().info(
-                        f'\033[92m[MotionGate] Chassis motion enabled: Resumed single goal navigation to [{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}]!\033[0m'
-                    )
                 else:
-                    self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path or goal -> IDLE")
+                    self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path -> IDLE")
 
     def set_state(self, new_state: NavState, reason: str = "", error_msg: str = ""):
         """Transition navigation state and trigger immediate event-driven status dispatch."""
@@ -910,24 +878,66 @@ class NavigationPolicyNode(Node):
                 elapsed = now - self.last_depth_time
 
             if elapsed > self.camera_timeout:
-                cam_name = "RealSense" if ("camera" in self.depth_topic or "realsense" in self.depth_topic) else "ZED"
                 if self.report_failure:
                     self._stop_robot()
                     self.set_state(
                         NavState.ERROR,
-                        reason=f"{cam_name} camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
+                        reason=f"ZED camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
                         error_msg="zed_camera_lost"
                     )
                     self.get_logger().error(
                         '\033[91m' +
-                        f'[Safety Watchdog] {cam_name} camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
+                        f'[Safety Watchdog] ZED camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
                         '\033[0m'
                     )
                 else:
                     self.get_logger().warn(
-                        f'[Safety Watchdog] {cam_name} camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
+                        f'[Safety Watchdog] ZED camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
                         throttle_duration_sec=3.0
                     )
+
+    def check_goal_stream_timeout(self):
+        """Brake when the optional VLN goal-stream watchdog expires.
+
+        Position-based arrival (``base_goal_arrive_threshold``) is the primary
+        stop condition for base-frame goals. This watchdog is disabled by
+        default (``goal_stream_timeout <= 0``) and only exists as an optional
+        safety net for upstreams that stop publishing without reaching a point.
+        """
+        if not self.goal_is_relative or self.goal_stream_timeout <= 0.0:
+            return
+        if self.last_goal_rx_time is None or self.state != NavState.RUNNING:
+            return
+
+        age = time.time() - self.last_goal_rx_time
+        if age <= self.goal_stream_timeout:
+            return
+
+        try:
+            # Stale stream: brake immediately and drop the expired target so a
+            # later joystick resume cannot chase an outdated VLN point.
+            self._stop_robot()
+            self.target_pos_w = None
+            self.target_yaw_w = None
+            self.last_target_pos = None
+            self.last_action = self._reset_last_action()
+            self.goal_is_relative = False
+            self.last_goal_rx_time = None
+            self.is_aligning_heading = False
+            self.set_state(
+                NavState.STOPPED,
+                reason=(f"VLN goal stream stale ({age:.2f}s > {self.goal_stream_timeout:.2f}s): "
+                        "braked, waiting for the next VLN goal")
+            )
+            self.get_logger().warn(
+                '\033[93m' +
+                f'[VLN Watchdog] No new base-frame goal for {age:.2f}s: robot braked, state -> STOPPED. '
+                'Waiting for the next VLN goal.'
+                '\033[0m'
+            )
+        except Exception:
+            import traceback
+            self.get_logger().error(f'[VLN Watchdog] exception while braking:\n{traceback.format_exc()}')
 
     def format_status_json(self) -> str:
         """Format current state as standard JSON string per local_planner_status_diagram (1).html:
@@ -989,6 +999,8 @@ class NavigationPolicyNode(Node):
     def _finish_terminal_goal(self, reason="Terminal goal reached"):
         """Finish the terminal goal, actively brake, clear tracking, and transition state."""
         self._stop_robot()
+        self.goal_is_relative = False
+        self.last_goal_rx_time = None
         self.is_aligning_heading = False
         self.heading_align_target_yaw = None
         self.heading_align_terminal_pos = None
@@ -1116,11 +1128,13 @@ class NavigationPolicyNode(Node):
 
         if cmd in ("pause", "stop"):
             # Emergency brake and enter STOPPED, automatically retaining current path
+            self.user_pause_latched = True
             self.set_state(NavState.STOPPED, reason=f"/mission/control received '{cmd}'")
             self._stop_robot()
             self.get_logger().warn(f'Navigation STOPPED by /mission/control ("{cmd}"). Current path automatically retained in memory.')
         elif cmd in ("resume", "continue"):
             # Resume if active path exists (from STOPPED, IDLE, or FAILED)
+            self.user_pause_latched = False
             if self.state in (NavState.STOPPED, NavState.IDLE, NavState.FAILED):
                 if self.path_tracker.is_active():
                     self.goal_reached_latched = False
@@ -1149,6 +1163,10 @@ class NavigationPolicyNode(Node):
         Args:
             path_msg: nav_msgs/msg/Path message.
         """
+        # A global path supersedes any VLN base-frame goal stream.
+        self.goal_is_relative = False
+        self.last_goal_rx_time = None
+
         # Reject path if in fatal unrecovered sensor error (e.g. camera lost)
         if self.report_failure and self.state == NavState.ERROR and (self.last_depth_time is None or time.time() - self.last_depth_time > self.camera_timeout):
             self._stop_robot()
@@ -1284,10 +1302,7 @@ class NavigationPolicyNode(Node):
 
         # 1) Don't proceed until odometry has come in at least once
         if not self.odom_ready:
-            self.get_logger().warn(
-                '\033[93m' + f'Waiting for odometry on {self.odom_topic} (Super LIO / relocation initializing)... (skipping depth callback)' + '\033[0m',
-                throttle_duration_sec=3.0
-            )
+            self.get_logger().warn('\033[93m' + 'Odometry not ready, skipping depth callback.' + '\033[0m')
             return
 
         # 2) Convert ROS Image → cv2 / NumPy, clamp NaNs / Infs / min/max
@@ -1354,7 +1369,7 @@ class NavigationPolicyNode(Node):
             self.is_aligning_heading = False
             # If in STOPPED state and path is present, keep blocked_detector window refreshed
             # so pausing does not accumulate stale stationary time into stall timeout
-            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and self._has_active_path():
+            if self.state == NavState.STOPPED and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
                 self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
             return
 
@@ -1491,16 +1506,29 @@ class NavigationPolicyNode(Node):
             return
         else:
             # Single goal tracking mode (e.g. from /goal_pose)
+            # VLN base-frame goals use a tighter arrival radius (default 10 cm);
+            # world-frame goals keep the historical threshold.
+            arrive_threshold = (
+                self.base_goal_arrive_threshold if self.goal_is_relative
+                else self.arrive_goal_threshold
+            )
             is_arrived = self._check_goal_reached(
-                self.target_pos_w, self.robot_pos_w, self.target_yaw_w, self.robot_orientation_w
+                self.target_pos_w, self.robot_pos_w, self.target_yaw_w, self.robot_orientation_w,
+                arrive_threshold=arrive_threshold
             )
             if is_arrived:
+                was_relative = self.goal_is_relative
                 self._stop_robot()
                 self.target_pos_w = None
                 self.target_yaw_w = None
                 self.last_action = self._reset_last_action()
                 self.set_state(NavState.GOAL_REACHED, reason="Single goal reached")
-                self.get_logger().info('Target reached: Target position reset, state -> GOAL_REACHED.')
+                if was_relative:
+                    # Stay in VLN mode: the next base-frame point restarts
+                    # navigation; the robot remains stopped until then.
+                    self.get_logger().info('VLN point reached: waiting for the next base-frame goal.')
+                else:
+                    self.get_logger().info('Target reached: Target position reset, state -> GOAL_REACHED.')
                 self.set_state(NavState.IDLE, reason="Single goal reached reported, immediate transition to IDLE")
                 return
 
@@ -1625,11 +1653,12 @@ class NavigationPolicyNode(Node):
            (len(joy_msg.buttons) > btn_abort and joy_msg.buttons[btn_abort] == 1):
             self.is_abort_goal = False
             self.set_state(NavState.STOPPED, reason="Joystick B button (Pause/Stop) pressed")
+            self.user_pause_latched = True
             self._stop_robot()
             if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker'):
                 self.blocked_detector.reset(
                     self.robot_odom_time,
-                    self.path_tracker.current_progress if self._has_active_path() else 0.0
+                    self.path_tracker.current_progress if self.path_tracker.has_path() else 0.0
                 )
             self.get_logger().warn(
                 '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0, path retained).\033[0m'
@@ -1649,13 +1678,14 @@ class NavigationPolicyNode(Node):
             self.last_trigger_time = current_time
             self.is_abort_goal = False
             self.goal_reached_latched = False
+            self.user_pause_latched = False
             self.unlock_chassis()
 
-            if self._has_active_path():
+            if self.path_tracker.has_path():
                 # Realign path tracker to current robot pose before resuming
                 pos_in_frame, _ = self.get_robot_pose_in_frame('map')
                 pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
-                if pos_check is not None and hasattr(self.path_tracker, 'realign_to_robot'):
+                if pos_check is not None:
                     self.path_tracker.realign_to_robot(pos_check[:2])
 
                 # Reset blocked detector so resuming has a clean 4.0s stall detection window
@@ -1934,7 +1964,8 @@ class NavigationPolicyNode(Node):
             self.get_logger().info('Near the current goal position.')
             return True
 
-    def _check_goal_reached(self, target_pos_w, robot_pos_w, target_yaw_w=None, robot_orientation_w=None):
+    def _check_goal_reached(self, target_pos_w, robot_pos_w, target_yaw_w=None, robot_orientation_w=None,
+                            arrive_threshold=None):
         """Check if robot has arrived at the goal.
 
         Args:
@@ -1942,6 +1973,7 @@ class NavigationPolicyNode(Node):
             robot_pos_w: Robot position in world frame
             target_yaw_w: Target yaw heading in world frame (radians)
             robot_orientation_w: Robot orientation quaternion [w, x, y, z]
+            arrive_threshold: Optional arrival radius override (m)
 
         Returns:
             True if arrived, False otherwise
@@ -1949,8 +1981,9 @@ class NavigationPolicyNode(Node):
         if target_pos_w is None or robot_pos_w is None:
             return False
 
+        threshold = self.arrive_goal_threshold if arrive_threshold is None else arrive_threshold
         dist = np.linalg.norm(np.array(target_pos_w[:2]) - np.array(robot_pos_w[:2]))
-        if dist > self.arrive_goal_threshold:
+        if dist > threshold:
             return False
 
         if getattr(self.model, 'has_heading', False) and target_yaw_w is not None and robot_orientation_w is not None:
@@ -1959,29 +1992,144 @@ class NavigationPolicyNode(Node):
             yaw_diff = abs((target_yaw_w - robot_yaw + np.pi) % (2.0 * np.pi) - np.pi)
             if yaw_diff > self.arrive_heading_threshold:
                 self.get_logger().info(
-                    f'At goal position ({dist:.2f}m <= {self.arrive_goal_threshold:.2f}m), '
+                    f'At goal position ({dist:.2f}m <= {threshold:.2f}m), '
                     f'aligning heading: {np.degrees(yaw_diff):.1f}° > {np.degrees(self.arrive_heading_threshold):.1f}°'
                 )
                 return False
 
-        self.get_logger().info(f'Arrived at the goal position and heading. Distance: {dist:.3f}m <= {self.arrive_goal_threshold:.3f}m')
+        self.get_logger().info(f'Arrived at the goal position and heading. Distance: {dist:.3f}m <= {threshold:.3f}m')
         return True
+
+    def _is_base_frame_goal(self, frame_id: str) -> bool:
+        """Decide whether an incoming goal is expressed in the robot base frame."""
+        if self.goal_frame_mode == 'base':
+            return True
+        if self.goal_frame_mode == 'world':
+            return False
+        return frame_id in self.base_frame_ids
+
+    def _handle_base_frame_goal(self, msg: PoseStamped):
+        """Transform a base-frame (VLN) goal into the world frame.
+
+        The goal is transformed once, at receipt time, using the current robot
+        pose from odometry. Its orientation, when present, is treated as a
+        heading offset relative to the robot's current heading.
+
+        Arrival uses ``base_goal_arrive_threshold`` (default 10 cm). Every
+        incoming point is re-latched to the world frame at receipt time, so
+        VLN may refine a point near the previous one; the robot simply follows
+        the newest target and stops once it is within the arrival radius.
+        """
+        if self.robot_pos_w is None or self.robot_orientation_w is None:
+            self.get_logger().warn(
+                'Base-frame goal received before odometry is ready; ignoring it.',
+                throttle_duration_sec=2.0
+            )
+            return
+
+        p_b = np.array([
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z
+        ], dtype=np.float32)
+        if not np.all(np.isfinite(p_b)):
+            self.get_logger().warn('Ignoring base-frame goal with non-finite position.')
+            return
+
+        dist_b = float(np.linalg.norm(p_b))
+        if self.base_goal_max_distance > 0.0 and dist_b > self.base_goal_max_distance:
+            p_b = p_b * (self.base_goal_max_distance / dist_b)
+            self.get_logger().warn(
+                f'Base-frame goal clamped from {dist_b:.2f}m to {self.base_goal_max_distance:.2f}m.',
+                throttle_duration_sec=2.0
+            )
+
+        robot_pos = np.array(self.robot_pos_w, dtype=np.float32)[np.newaxis]
+        robot_ori = np.array(self.robot_orientation_w, dtype=np.float32)[np.newaxis]
+        p_w = transform_points(p_b[np.newaxis], robot_pos, robot_ori)[0]
+
+        self.target_pos_w = [float(p_w[0]), float(p_w[1]), float(p_w[2])]
+        self.last_target_pos = list(self.target_pos_w)
+
+        # Heading: relative yaw offset applied on top of the current robot yaw.
+        q = msg.pose.orientation
+        norm_sq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w
+        qw, qx, qy, qz = self.robot_orientation_w
+        robot_yaw = np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        if norm_sq > 0.5:
+            rel_yaw = np.arctan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            target_yaw = robot_yaw + rel_yaw
+            target_yaw = float(np.arctan2(np.sin(target_yaw), np.cos(target_yaw)))
+        else:
+            target_yaw = float(robot_yaw)
+        self.target_yaw_w = target_yaw
+
+        self.goal_is_relative = True
+        self.last_goal_rx_time = time.time()
+
+        self.path_tracker.clear()
+        self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
+        if self.user_pause_latched:
+            # A manual stop (B / motion disable / mission pause) must not be
+            # overridden by the next goal of a continuously publishing VLN.
+            self.get_logger().info(
+                'VLN goal updated, but the robot stays STOPPED (manual pause latched). '
+                'Press A / resume to continue.',
+                throttle_duration_sec=2.0
+            )
+        else:
+            self.set_state(NavState.RUNNING, reason="VLN base-frame goal received")
+
+        robot_pos_str = f"[{self.robot_pos_w[0]:.2f}, {self.robot_pos_w[1]:.2f}, {self.robot_pos_w[2]:.2f}]"
+        self.get_logger().info(
+            '\033[96m' +
+            f'[VLN] base goal=[{p_b[0]:.2f}, {p_b[1]:.2f}, {p_b[2]:.2f}] ({dist_b:.2f}m) -> '
+            f'world=[{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}], '
+            f'target_yaw: {self.target_yaw_w:.2f} rad ({np.degrees(self.target_yaw_w):.1f}°), '
+            f'Robot: {robot_pos_str}. Arrival radius: {self.base_goal_arrive_threshold:.2f}m.'
+            '\033[0m',
+            throttle_duration_sec=0.5
+        )
 
     def target_position_callback(self, msg: PoseStamped):
         """Process incoming goal pose messages.
 
+        Two goal interpretations are supported (parameter ``goal_frame_mode``):
+          * ``world`` / ``auto``: absolute goal in the odometry frame
+            (``map`` / ``world`` / ``odom`` / matching ``map_frame_id``).
+          * ``base`` (or a ``frame_id`` listed in ``base_frame_ids``, e.g.
+            ``base_link``): goal expressed in the robot base frame, intended
+            for an upstream VLN module. The point is transformed into the
+            world frame using the current robot pose and followed until the
+            robot is within ``base_goal_arrive_threshold`` (default 10 cm).
+
         Args:
             msg: PoseStamped message with goal position
         """
+        frame_id = msg.header.frame_id.strip()
+
+        if self._is_base_frame_goal(frame_id):
+            self._handle_base_frame_goal(msg)
+            return
+
         # Accept map, world, odom, empty string, or matching map_frame_id
         valid_frames = {self.map_frame_id, 'world', 'map', 'odom', ''}
-        if self.map_frame_id and msg.header.frame_id not in valid_frames:
+        if self.map_frame_id and frame_id not in valid_frames:
             self.get_logger().error(
                 '\033[91m' +
-                f'Target frame_id "{msg.header.frame_id}" does not match odometry frame_id "{self.map_frame_id}"' +
+                f'Target frame_id "{frame_id}" does not match odometry frame_id "{self.map_frame_id}"' +
                 '\033[0m'
             )
             return
+
+        # Absolute goal: leave VLN streaming mode.
+        self.goal_is_relative = False
+        self.last_goal_rx_time = None
 
         # If the received goal z is zero or very close to zero, use the robot's current z
         goal_z = msg.pose.position.z
@@ -2015,6 +2163,11 @@ class NavigationPolicyNode(Node):
         robot_pos_str = f"[{self.robot_pos_w[0]:.2f}, {self.robot_pos_w[1]:.2f}, {self.robot_pos_w[2]:.2f}]" if self.robot_pos_w else "N/A"
         self.path_tracker.clear()
         self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
+        self.is_aligning_heading = False
+        self.heading_align_target_yaw = None
+        self.heading_align_terminal_pos = None
+        self.heading_align_start_time = None
+        self.heading_align_stable_count = 0
         self.set_state(NavState.RUNNING, reason="Single goal received")
         self.get_logger().info(
             '\033[92m' +
@@ -2086,7 +2239,7 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--sim', action='store_true', help='run in simulation mode')
     parser.add_argument('--policy-path', type=str, default=None, help='Path to custom nav_policy.onnx')
-    parser.add_argument('--arrive-threshold', type=float, default=None, help='Goal arrival distance threshold in meters (default: 0.20)')
+    parser.add_argument('--arrive-threshold', type=float, default=0.45, help='Goal arrival distance threshold in meters (default: 0.45)')
     parser.add_argument('--path-topic', type=str, default=None, help='Global path topic name (default: /global_path)')
     parser.add_argument('--stop-topic', type=str, default=None, help='Mission control topic name (default: /mission/control)')
     parser.add_argument('--control-topic', type=str, default=None, help='Mission control topic alias (default: /mission/control)')
@@ -2167,9 +2320,11 @@ def main(args=None):
         pass
     except Exception as e:
         import traceback
-        navigation_policy_node.get_logger().fatal(
-            f"Fatal unhandled exception in spin(): {e}\n{traceback.format_exc()}"
-        )
+        traceback.print_exc()
+        try:
+            navigation_policy_node.get_logger().error(f'Uncaught exception in spin: {e}')
+        except Exception:
+            pass
     finally:
         try:
             navigation_policy_node.lock_chassis()

@@ -1,22 +1,22 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 78
+    Help Height: 0
     Name: Displays
     Property Tree Widget:
       Expanded:
         - /Global Options1
         - /Status1
-        - /Path1
-        - /map1
         - /Axes1
+        - /map1
+        - /Path1
       Splitter Ratio: 0.5
-    Tree Height: 550
+    Tree Height: 211
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
     Expanded:
-      - /2D Goal Pose1
       - /2D Pose Estimate1
+      - /2D Goal Pose1
     Name: Tool Properties
     Splitter Ratio: 0.5886790156364441
   - Class: rviz_common/Views
@@ -24,7 +24,6 @@ Panels:
       - /Current View1
     Name: Views
     Splitter Ratio: 0.5
-
 Visualization Manager:
   Class: ""
   Displays:
@@ -34,7 +33,7 @@ Visualization Manager:
       Color: 160; 160; 164
       Enabled: true
       Line Style:
-        Line Width: 0.03
+        Line Width: 0.029999999329447746
         Value: Lines
       Name: Grid
       Normal Cell Count: 0
@@ -47,10 +46,10 @@ Visualization Manager:
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: false
+      Enabled: true
       Max Value: 5
       Median window: 5
-      Min Value: 0.1
+      Min Value: 0.10000000149011612
       Name: Image (Disabled)
       Normalize Range: true
       Topic:
@@ -59,19 +58,19 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /zed/zed_node/depth/depth_registered
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 3.8
-        Min Value: -0.65
+        Max Value: 5.74963903427124
+        Min Value: -0.8167861700057983
         Value: true
       Axis: Z
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
       Color Transformer: AxisColor
-      Decay Time: 0.1
+      Decay Time: 0.10000000149011612
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
@@ -82,11 +81,12 @@ Visualization Manager:
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
-      Size (m): 0.05
+      Size (m): 0.05000000074505806
       Style: Points
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /lio/cloud_world
@@ -101,6 +101,7 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /vis/goal_vector_marker
@@ -113,6 +114,7 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /vis/twist_cmd_marker
@@ -125,6 +127,7 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /vis/moving_goal_marker
@@ -137,15 +140,16 @@ Visualization Manager:
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /vis/lookahead_goal
       Value: true
     - Class: rviz_default_plugins/Axes
       Enabled: true
-      Length: 1.0
+      Length: 1
       Name: Axes
-      Radius: 0.1
+      Radius: 0.10000000149011612
       Reference Frame: base
       Value: true
     - Alpha: 1
@@ -163,18 +167,19 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 50
+      Max Intensity: 1
       Min Color: 0; 0; 0
-      Min Intensity: 0.04
+      Min Intensity: 2.3088504036309788e-23
       Name: map
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
-      Size (m): 0.1
+      Size (m): 0.10000000149011612
       Style: Points
       Topic:
         Depth: 5
         Durability Policy: Transient Local
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /global_planner/raw_map
@@ -186,11 +191,11 @@ Visualization Manager:
       Class: rviz_default_plugins/Path
       Color: 0; 0; 0
       Enabled: true
-      Head Diameter: 0.3
-      Head Length: 0.2
-      Length: 0.3
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
       Line Style: Billboards
-      Line Width: 0.12
+      Line Width: 0.11999999731779099
       Name: Path
       Offset:
         X: 0
@@ -198,12 +203,13 @@ Visualization Manager:
         Z: 0
       Pose Color: 255; 85; 255
       Pose Style: None
-      Radius: 0.03
-      Shaft Diameter: 0.1
-      Shaft Length: 0.1
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
       Topic:
         Depth: 5
         Durability Policy: Volatile
+        Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /global_path
@@ -223,6 +229,9 @@ Visualization Manager:
     - Class: rviz_default_plugins/Measure
       Line color: 128; 128; 0
     - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -245,32 +254,41 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 14.0
+      Distance: 22.11025047302246
       Enable Stereo Rendering:
-        Stereo Eye Separation: 0.06
+        Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
+        X: -2.4617958068847656
+        Y: 12.263005256652832
+        Z: -8.009661674499512
       Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
-      Near Clip Distance: 0.01
-      Pitch: 1.36
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.949796199798584
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.22
+      Yaw: 0.11181164532899857
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 1000
+  Height: 986
   Hide Left Dock: false
   Hide Right Dock: false
-  Width: 1800
-  X: 50
-  Y: 50
+  Image (Disabled):
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000100000000000001cb00000380fc0200000005fb000000200049006d0061006700650020002800440069007300610062006c006500640029010000003d000000a10000002800fffffffb000000100044006900730070006c00610079007301000000e400000110000000c900fffffffb0000001200530065006c0065006300740069006f006e01000001fa000000830000005c00fffffffb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000283000000840000005c00fffffffb0000000a00560069006500770073010000030d000000b0000000a400ffffff000004790000038000000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1610
+  X: 70
+  Y: 27

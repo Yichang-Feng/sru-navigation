@@ -1,7 +1,6 @@
 """Path tracking, lookahead carrot point generation, and stall detection for global navigation integration."""
 
 from enum import Enum
-import math
 import numpy as np
 
 
@@ -35,13 +34,13 @@ class PathSegmentTracker:
         self.is_path_active = False
         self.frame_id = 'map'
 
-    def set_path(self, points, terminal_yaw=None, frame_id='map', *args, **kwargs):
+    def set_path(self, points, terminal_yaw=None, frame_id='map'):
         """Set a new path segment.
 
         Args:
             points: List of [x, y, z] coordinates or Pose objects.
             terminal_yaw: Optional terminal heading in radians.
-            frame_id: Coordinate frame for path tracking (default 'map').
+            frame_id: Frame the path points are expressed in.
 
         Returns:
             bool: True if path was successfully set.
@@ -61,7 +60,7 @@ class PathSegmentTracker:
 
         self.points = pts
         self.terminal_yaw = terminal_yaw
-        self.frame_id = str(frame_id) if frame_id else 'map'
+        self.frame_id = frame_id if frame_id else 'map'
 
         # Compute cumulative 2D planar distances along the path
         self.cum_dists = [0.0]
@@ -91,8 +90,46 @@ class PathSegmentTracker:
         return self.is_path_active and len(self.points) > 0
 
     def has_path(self):
-        """Check if path tracker is active with a valid path (alias for is_active)."""
+        """Alias kept for the navigation controller's path-state checks."""
         return self.is_active()
+
+    def get_terminal_pose(self):
+        """Return (terminal point [x, y, z], terminal yaw), or (None, None)."""
+        if not self.is_active():
+            return None, None
+        return self.points[-1].tolist(), self.terminal_yaw
+
+    def realign_to_robot(self, robot_pos_xy):
+        """Re-project the tracker onto the nearest path segment after a pause."""
+        if not self.is_active() or robot_pos_xy is None:
+            return 0.0
+
+        r_pos = np.array(robot_pos_xy[:2], dtype=np.float64)
+        best_dist_sq = float("inf")
+        best_progress = self.current_progress
+        best_seg = self.current_seg_idx
+        for i in range(len(self.points) - 1):
+            p1 = self.points[i][:2]
+            p2 = self.points[i + 1][:2]
+            v = p2 - p1
+            seg_len_sq = float(np.dot(v, v))
+            if seg_len_sq < 1e-8:
+                t = 0.0
+                proj = p1
+            else:
+                t = float(np.dot(r_pos - p1, v) / seg_len_sq)
+                t = max(0.0, min(1.0, t))
+                proj = p1 + t * v
+            d_sq = float(np.sum((r_pos - proj) ** 2))
+            if d_sq < best_dist_sq:
+                best_dist_sq = d_sq
+                seg_len = self.cum_dists[i + 1] - self.cum_dists[i]
+                best_progress = self.cum_dists[i] + t * seg_len
+                best_seg = i
+
+        self.current_seg_idx = best_seg
+        self.current_progress = best_progress
+        return self.current_progress
 
     def update_progress(self, robot_pos_xy):
         """Project robot position onto the path polyline to update arc-length progress.
@@ -112,11 +149,12 @@ class PathSegmentTracker:
 
         r_pos = np.array(robot_pos_xy[:2], dtype=np.float64)
 
+        # Search around current_seg_idx to prevent backtracking across loops
         best_dist_sq = float("inf")
         best_progress = self.current_progress
         best_seg = self.current_seg_idx
 
-        # Search from max(0, current_seg_idx - 1) to end to enforce monotonic forward progress
+        # Search from max(0, current_seg_idx - 1) to end
         start_idx = max(0, self.current_seg_idx - 1)
         for i in range(start_idx, len(self.points) - 1):
             p1 = self.points[i][:2]
@@ -139,47 +177,22 @@ class PathSegmentTracker:
                 best_progress = self.cum_dists[i] + t * seg_len
                 best_seg = i
 
+        # Monotonic forward progress with small tolerance
         self.current_seg_idx = best_seg
         self.current_progress = max(self.current_progress, best_progress)
         return self.current_progress
 
-    def realign_to_robot(self, robot_pos_xy):
-        """Realign progress to robot's current position without monotonic restriction."""
-        if not self.is_active() or robot_pos_xy is None:
-            return 0.0
-
-        r_pos = np.array(robot_pos_xy[:2], dtype=np.float64)
-        best_dist_sq = float("inf")
-        best_progress = self.current_progress
-        best_seg = self.current_seg_idx
-
-        for i in range(len(self.points) - 1):
-            p1 = self.points[i][:2]
-            p2 = self.points[i + 1][:2]
-            v = p2 - p1
-            seg_len_sq = float(np.dot(v, v))
-
-            if seg_len_sq < 1e-8:
-                t = 0.0
-                proj = p1
-            else:
-                t = float(np.dot(r_pos - p1, v) / seg_len_sq)
-                t = max(0.0, min(1.0, t))
-                proj = p1 + t * v
-
-            d_sq = float(np.sum((r_pos - proj) ** 2))
-            if d_sq < best_dist_sq:
-                best_dist_sq = d_sq
-                seg_len = self.cum_dists[i + 1] - self.cum_dists[i]
-                best_progress = self.cum_dists[i] + t * seg_len
-                best_seg = i
-
-        self.current_seg_idx = best_seg
-        self.current_progress = best_progress
-        return self.current_progress
-
     def get_lookahead_point(self, lookahead_dist=2.0):
-        """Compute the dynamic lookahead carrot point along the path."""
+        """Compute the dynamic lookahead carrot point along the path.
+
+        Args:
+            lookahead_dist: Lookahead distance L in meters (default: 2.0m).
+
+        Returns:
+            tuple: (carrot_pt_3d, carrot_yaw)
+                carrot_pt_3d: list [x, y, z]
+                carrot_yaw: float (radians) or None
+        """
         if not self.is_active():
             return None, None
 
@@ -189,8 +202,10 @@ class PathSegmentTracker:
 
         target_arc = self.current_progress + lookahead_dist
 
+        # If lookahead reaches or exceeds terminal goal, clamp to terminal point
         if target_arc >= self.total_length:
             terminal_pt = self.points[-1].tolist()
+            # If terminal_yaw not explicitly set, use tangent of last segment
             yaw = self.terminal_yaw
             if yaw is None:
                 p_prev = self.points[-2]
@@ -198,6 +213,7 @@ class PathSegmentTracker:
                 yaw = float(np.arctan2(p_last[1] - p_prev[1], p_last[0] - p_prev[0]))
             return terminal_pt, yaw
 
+        # Find the segment containing target_arc
         for i in range(len(self.points) - 1):
             s_start = self.cum_dists[i]
             s_end = self.cum_dists[i + 1]
@@ -206,22 +222,27 @@ class PathSegmentTracker:
                 ratio = (target_arc - s_start) / seg_len if seg_len > 1e-6 else 0.0
                 carrot_xy = self.points[i][:2] + ratio * (self.points[i + 1][:2] - self.points[i][:2])
                 carrot_z = self.points[i][2] + ratio * (self.points[i + 1][2] - self.points[i][2])
+
+                # Tangent yaw along segment
                 seg_yaw = float(np.arctan2(
                     self.points[i + 1][1] - self.points[i][1],
                     self.points[i + 1][0] - self.points[i][0]
                 ))
                 return [float(carrot_xy[0]), float(carrot_xy[1]), float(carrot_z)], seg_yaw
 
+        # Fallback to terminal point
         return self.points[-1].tolist(), self.terminal_yaw
 
-    def get_terminal_pose(self):
-        """Get terminal goal position and orientation yaw."""
-        if not self.is_active() or len(self.points) == 0:
-            return None, None
-        return self.points[-1].tolist(), self.terminal_yaw
+    def check_arrived(self, robot_pos_xy, arrive_threshold=0.15):
+        """Check if robot is within arrive_threshold of the terminal goal point.
 
-    def check_arrived(self, robot_pos_xy, arrive_threshold=0.20):
-        """Check if robot is within arrive_threshold of the terminal goal point."""
+        Args:
+            robot_pos_xy: Robot [x, y] in world/map frame.
+            arrive_threshold: Arrival distance threshold (default: 0.15m).
+
+        Returns:
+            bool: True if arrived at terminal goal.
+        """
         if not self.is_active() or robot_pos_xy is None:
             return False
 
@@ -242,6 +263,12 @@ class BlockedDetector:
     """Detects when the robot is blocked / stalled against obstacles."""
 
     def __init__(self, timeout=4.0, dist_threshold=0.1, vel_threshold=0.1):
+        """
+        Args:
+            timeout: Stalled duration threshold in seconds (default: 4.0s).
+            dist_threshold: Minimum progress increment required (default: 0.1m).
+            vel_threshold: Physical velocity threshold (default: 0.1m/s).
+        """
         self.timeout = float(timeout)
         self.dist_threshold = float(dist_threshold)
         self.vel_threshold = float(vel_threshold)
@@ -255,7 +282,16 @@ class BlockedDetector:
         self.start_progress = progress_s
 
     def update(self, current_time, progress_s, robot_vel_xy):
-        """Check if robot has been stalled for more than timeout."""
+        """Check if robot has been stalled for more than timeout.
+
+        Args:
+            current_time: Current timestamp (seconds).
+            progress_s: Current accumulated arc-length progress along path.
+            robot_vel_xy: Robot velocity [vx, vy] in m/s.
+
+        Returns:
+            bool: True if robot is blocked / stalled.
+        """
         if current_time is None:
             return False
 
@@ -267,11 +303,13 @@ class BlockedDetector:
         v_mag = float(np.linalg.norm(robot_vel_xy[:2])) if robot_vel_xy is not None else 0.0
         delta_s = abs(progress_s - self.start_progress)
 
+        # If robot made sufficient progress or is moving with non-negligible speed
         if delta_s >= self.dist_threshold or v_mag >= self.vel_threshold:
             self.window_start_time = current_time
             self.start_progress = progress_s
             return False
 
+        # Robot has made little progress and velocity is near zero
         elapsed = current_time - self.window_start_time
         if elapsed >= self.timeout:
             return True

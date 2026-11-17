@@ -1,0 +1,83 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 40; 40; 40
+    Fixed Frame: world
+    Frame Rate: 20
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 30
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+    - Class: rviz_default_plugins/Path
+      Name: Global path
+      Enabled: true
+      Topic:
+        Value: /global_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Color: 30; 200; 255
+      Line Style: Lines
+      Line Width: 0.03
+    # 与 path_follow 使用相同的几何路径；非持久化以避免重放过期路径。
+    - Class: rviz_default_plugins/Path
+      Name: Local path
+      Enabled: true
+      Topic:
+        Value: /local_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Color: 255; 180; 20
+      Line Style: Lines
+      Line Width: 0.04
+    - Class: rviz_default_plugins/Marker
+      Name: Local trajectory
+      Enabled: true
+      Topic:
+        Value: /optimal_list
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Marker
+      Name: Reference trajectory
+      Enabled: true
+      Topic:
+        Value: /global_list
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Marker
+      Name: Body inflation
+      Enabled: true
+      Topic:
+        Value: /self_inflation
+        Durability Policy: Transient Local
+    - Class: rviz_default_plugins/Marker
+      Name: Sliding map bounds
+      Enabled: true
+      Topic:
+        Value: /grid_map/sliding_map_bbox
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Occupancy
+      Enabled: true
+      Topic:
+        Value: /grid_map/occupancy
+        Reliability Policy: Best Effort
+      Size (m): 0.05
+      Style: Flat Squares
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 12
+      Pitch: 0.7
+      Yaw: 0.8
+Window Geometry:
+  Width: 1280
+  Height: 800

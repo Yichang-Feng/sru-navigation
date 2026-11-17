@@ -11,11 +11,7 @@
 
 | 节点 IP | 角色与硬件定位 | OS / 环境 | 登录方式 | 职能分工 |
 |---|---|---|---|---|
-| `10.3.42.161`（WiFi，机载网 `192.168.123.111`） | **高层视觉、雷达 SLAM 与强化学习核心脑**（背部外挂 NVIDIA Jetson Orin DevKit） | Ubuntu 22.04 LTS / JetPack 6.x / CUDA 12.x / Py3.10 / **ROS 2 Humble** | `ssh agile@10.3.42.161`（备选 `192.168.31.186` 或 `192.168.123.111`），密码 `agile` 或 `123` | **高层算法主战场（可单机跑全套）**：直连 ZED 2i 与 Livox MID-360，运行 Super LIO 重定位与 `rl_nav_controller`，输出 `/cmd_vel` |
-| `192.168.123.18` | **底盘机载主脑**（腹部原装 NVIDIA Jetson Orin NX 16GB） | Ubuntu 20.04.5 LTS / JetPack 5.1.1 / CUDA 11.8 / **ROS 2 Foxy** | `ssh unitree@192.168.123.18`，密码 `123` | **底层与原厂中枢**：运行 `unitree_bridge` 监听 `/cmd_vel` 并下发 `/api/sport/request`（若开机自启则无需登录） |
-| `192.168.123.161` | **底层运动控制主板**（宇树 CM4/MCU） | 宇树嵌入式 Linux | `ssh unitree@192.168.123.161`，密码 `123` | 接收 DDS 报文，驱动 12 关节 + 4 轮毂电机 |
-| `192.168.123.1` | 车载路由器 / 外接网关 | 嵌入式网关 | `192.168.123.1` | 提供 WiFi AP 热点 |
-| `192.168.123.138` | 外部调试笔记本（PC） | Ubuntu 22.04 | 本机终端 | 算法开发、训练、模型导出、RViz 发点 |
+| `10.3.42.161`（WiFi，机载网 `192.168.123.111`） | **高层视觉、雷达 SLAM 与强化学习核心脑**（背部外挂 NVIDIA Jetson Orin DevKit） | Ubuntu 22.04 LTS / JetPack 6.x / CUDA 12.x / Py3.10 / **ROS 2 Humble** | `ssh agile@10.3.42.161`（备选 `192.168.31.186` ），密码 `1` | **高层算法主战场（可单机跑全套）**：直连 realsense 与 Livox MID-360，运行 Super LIO 重定位与 `rl_nav_controller`，输出 `/cmd_vel` |
 
 ### 1.1 传感器与物理接口
 
@@ -36,12 +32,20 @@
 
 ### 1.2 机载工作空间（与本仓库对照）
 
-高层机 `192.168.123.111`（`agile`），位于 `/home/agile/`（本地备份在 `/home/yichangfeng/go2w_robot_ref/jetson_111/`）：
+高层机 `192.168.123.111`（`agile`），位于 `/home/agile/`（本地快照：`~/go2w_ref/`，2026-11-16 复制自狗上的 `go2w_nav_ros2_ws` 与 `sru_ws`）：
 
 ```
 /home/agile/
-├── sru_ws/                      # SRU 端到端导航专项工作空间 (ROS 2 Humble)
-│   └── src/                     # rl_nav_controller
+├── go2w_nav_ros2_ws/            # 高层导航栈 (ROS 2 Humble)
+│   ├── src/                     # rl_nav_controller / global_planner / local_planner / path_follow /
+│   │                            # go2w_bridge / task_manager / rviz_tools / Super-LIO-ros2
+│   │                            #   (Super-LIO-ros2/src/basic, src/super_lio, map/loc_map)
+│   ├── start_nav.sh  start_nav_custom.sh  start_nav_adaptive.sh  start_nav_stairs.sh
+│   └── stop_nav.sh  rviz.rviz  test.rviz
+├── sru_ws/                      # 局部 SRU 模式工作空间；src/sru-robot-deployment 是本仓库在狗上的旧克隆
+│   ├── src/sru-robot-deployment/rl_nav_controller/   # 局部模式使用的控制器包
+│   ├── model/  map/  benchmark/
+│   └── start_local_sru.sh  stop_local_sru.sh  *_nav_override.yaml  local_sru.rviz
 ├── bridge_ws/                   # 通用底盘桥与导航接口工作空间
 ├── realworld/                   # 路试、Waypoints、场景配置
 ├── onnxruntime_gpu-...whl       # Py3.10 GPU 推理加速包
@@ -104,10 +108,16 @@ ros2 node list | grep unitree_bridge   # 若已自启则跳过
 ros2 run unitree_bridge unitree_bridge  # 未自启时手动启动
 ```
 
-**终端 2 — 雷达 + Super LIO 重定位 + RViz**
+**终端 2 — 雷达 + Super-LIO 地图定位**
 ```bash
-ros2 launch super_lio relocation.py rviz:=true
-# 首次重定位与地图稍有错位时，RViz 顶部点击 2D Pose Estimate (p) 对齐
+ros2 launch super_lio map_localization.py
+# 节点启动后停在 WAIT_INIT，必须先给初始位姿，否则既不广播 map -> world，也不发 /loc/robo/odom：
+#   A) RViz 里按 p（2D Pose Estimate）在地图上点出狗的位置并拉出朝向；
+#   B) 或直接发（位姿换成狗在地图中的实际位置/朝向）：
+# ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped \
+#   "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}"
+# 本 launch 不自动弹 RViz；需要时：ros2 run rviz2 rviz2 -d ~/go2w_nav_ros2_ws/rviz.rviz
+# 旧流程 relocation.py 仍可用（静态广播 map->world），但它的 rviz:=true 参数实际不生效（rviz 节点未加入 LaunchDescription）。
 ```
 
 **终端 3 — ZED 2i 深度相机**
@@ -123,11 +133,10 @@ ros2 run tf2_ros static_transform_publisher 0.257 0.0 0.28 0.0 0.0 0.0 base_link
 
 **终端 5 — SRU 强化学习策略**
 ```bash
-ros2 run rl_nav_controller rl_nav_controller \
-  --ros-args \
-  -r /dlio/odom_node/odom:=/lio/robo/odom \
-  -r /path_manager/path_manager_ros/nav_vel:=/cmd_vel
+ros2 launch rl_nav_controller rl_nav_controller.launch.py
+# 默认 odom_topic=/lio/robo/odom（world 系前端里程计），同时额外订阅 /loc/robo/odom（map 系定位输出）
 # 输出 "Navigation policy node is ready." + "First odometry message received, odom is ready." 即待命
+# 常用参数：lookahead_distance:=2.0  depth_topic:=<深度话题>  report_failure:=false
 ```
 
 ### 3.3 一键脚本部署到 111
@@ -153,7 +162,8 @@ ros2 topic pub /startNavi std_msgs/msg/Bool "{data: true}" --once
 ### 4.2 健康自检
 
 ```bash
-ros2 topic hz /lio/robo/odom            # 雷达里程计 10~50Hz
+ros2 topic hz /lio/robo/odom            # 前端雷达里程计 (world 系) 10~50Hz
+ros2 topic hz /loc/robo/odom            # 地图定位里程计 (map 系) 约 10Hz；无输出说明还在 WAIT_INIT
 ros2 topic hz /zed/zed_node/depth/depth_registered  # 相机深度 15~30Hz
 ros2 topic echo /cmd_vel                # 此时应全为 0（未发目标）
 ```
@@ -188,7 +198,7 @@ ros2 topic pub /goal_pose geometry_msgs/PoseStamped \
 
 ## 6. 模型热替换与 GPU 推理验证
 
-- 将 IsaacLab 训练好的最新权重导出为 `nav_policy.onnx`，scp 覆盖到 `~/sru_ws/src/rl_nav_controller/deployment_policies/`（或 `~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/`）。
+- 将 IsaacLab 训练好的最新权重导出为 `nav_policy.onnx`，scp 覆盖到 `~/go2w_nav_ros2_ws/src/rl_nav_controller/deployment_policies/`；走局部 SRU 模式时另同步到 `~/sru_ws/src/sru-robot-deployment/rl_nav_controller/deployment_policies/`。
 - 在 111 上验证 ONNX Runtime 是否启用 CUDA EP：
 
 ```bash
@@ -207,6 +217,9 @@ python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 | 3 | RViz Image 全黑 | 机器狗趴下时镜头距地面 < 0.2m 处于 ZED 盲区；悬空撑起或站立（离地 > 0.3m），话题设为 `/zed/zed_node/rgb/image_rect_color` 或勾选深度图 `Normalize Range` |
 | 4 | 跨机话题发现（DDS） | 两机使用相同 `ROS_DOMAIN_ID`（默认 0）；111 终端必须先 `source unitree_ros2/setup.sh` 加载宇树 DDS 接口与 QoS 配置 |
 | 5 | 模型热替换 | 见 §6 |
+| 6 | RViz 报 `Fixed Frame [map] does not exist`，且 `ros2 topic hz /loc/robo/odom` 无输出 | 定位节点停在 `WAIT_INIT`，还没收到 `/initialpose`（`map_localization.yaml` 里 `init_pose_source: topic`，`publish_when_invalid: false`）。给一次初始位姿后，动态 `map -> world` TF 与 `/loc/robo/odom` 会同时出现。给过仍无输出：看 Super-LIO 日志有无 `map_dir` 报错 / `LOST` / `FAILED`，`ros2 topic hz /lio/robo/odom` 确认前端在跑，`ros2 run tf2_tools view_frames` 看树里有没有 `world` |
+| 7 | 单独跑 `relocation.py` 时 `rviz:=true` 不弹窗 | 该 launch 里 rviz 节点创建后未加入 `LaunchDescription`，手动起：`ros2 run rviz2 rviz2 -d <super_lio 包>/rviz/relocation.rviz` |
+| 8 | 局部模式 RViz 正常、全局模式 map 帧报错 | 局部模式 `~/sru_ws/start_local_sru.sh` 额外广播了静态 `map -> world` 恒等 TF；全局 `start_nav.sh` 不广播，必须给 `/initialpose` 让定位节点自己发动态 TF |
 
 ---
 
