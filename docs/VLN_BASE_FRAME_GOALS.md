@@ -173,7 +173,7 @@ ssh agile@$ROBOT_IP "source /opt/ros/humble/setup.bash && cd ~/go2w_nav_ros2_ws 
     colcon build --packages-select rl_nav_controller --symlink-install"
 ```
 
-> 若车端是全新机器（尚无 `~/go2w_nav_ros2_ws`）：先把仓库里 `go2w_nav_ros2_ws/src/` 下的包全部同步到机载工作空间并整体 `colcon build`，再执行上述第 3 步。
+> 若车端是全新机器（尚无 `~/go2w_nav_ros2_ws`）：除上表外，还需把仓库里 `go2w_nav_ros2_ws/src/`（含 Super-LIO、go2w_bridge）与 `bridge_ws/src/livox_ros_driver2`（激光雷达驱动）同步到机载对应工作空间并整体 `colcon build`；另外 `realsense2_camera` 不在本仓库内，需机载预装（`sudo apt install ros-humble-realsense2-camera`）。
 
 ## 6. 启动（机载端）
 
