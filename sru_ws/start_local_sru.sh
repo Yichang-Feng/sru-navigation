@@ -7,15 +7,25 @@
 #       手柄按键统一对齐全局模式：[A] 启动/恢复运动，[B] 暂停刹停。
 #       到点判定距离与全局对齐为 0.20m。
 #
-# 适用硬件：高层核心机 Jetson Orin DevKit (192.168.123.111, 用户: agile)
-# 适用环境：Ubuntu 22.04 / ROS 2 Humble (通过 NoMachine 远程桌面或本地终端运行)
+# 适用环境（自适应）：
+#   - ROS 2 Foxy / Humble / Jazzy 自动检测 (/opt/ros/<distro>)，机载端实测为 Foxy
+#   - 所有节点均为单独启动 (ros2 run 逐节点拉起，每节点独立进程、独立 /tmp 日志)，
+#     不使用 ros2 launch 打包启动
+#   - onnxruntime 自动预检：缺失时自动安装（优先 pip --user 免 sudo；
+#     失败则建立继承 ROS 系统 site-packages 的专用 venv），无需手动处理
 #
-# 启动内容：
-#   [1] go2w_bridge (底盘控制与手柄通信桥，按 B 停止，按 A 启动)
-#   [2] super_lio relocation.py (Livox MID-360 雷达驱动 + SLAM 重定位 + 自动拉起 RViz)
-#   [3] 深度相机 (默认: Intel RealSense D435/D435i 原生深度图；可选: --zed 使用 ZED 2i)
-#   [4] static TF (base_link -> camera_link 水平相机外参标定)
-#   [5] rl_nav_controller (SRU 强化学习端到端避障导航策略节点，单点到点判定 0.20m)
+# 机载部署布局（本脚本位于 <deploy_root>/src/sru-local/sru_ws/）：
+#   ~/agile_nav_ws/src/sru-local/sru_ws/start_local_sru.sh    (本脚本)
+#   ~/agile_nav_ws/src/sru-local/go2w_nav_ros2_ws/            (rl_nav_controller / super_lio 等)
+#   ~/agile_nav_ws/src/sru-local/bridge_ws/                   (livox_ros_driver2 / unitree_bridge 等，可选)
+#
+# 启动内容（全部单独启动）：
+#   [1] ROS 环境加载 (distro 自动检测 + 各工作空间 install/setup.bash) + onnxruntime 预检
+#   [2] 底盘桥: go2w_bridge (cmd_vel_bridge + wireless_controller 两个独立进程) 或 unitree_bridge 降级
+#   [3] Livox MID-360 驱动 (livox_ros_driver2_node) + Super-LIO 定位
+#       (优先 map_localization_node，降级 relocation_node；relocation 模式补发静态 map->world TF)
+#   [4] 深度相机 (默认 RealSense D435i: realsense2_camera 单进程；可选 --zed)
+#   [5] rl_nav_controller (SRU 强化学习端到端避障策略节点，前台运行，单点到点判定 0.20m)
 #
 # 用法：
 #   ./start_local_sru.sh                 # 默认即 VLN 模式（等价于 --vln）：base 相对点 + 关 RViz + 10cm 到点，RealSense 相机
@@ -105,11 +115,14 @@ echo -e "${CYAN}   控制对齐: ${GREEN}按 [B] 停止刹停，按 [A] 启动/�
 echo -e "${CYAN}   目标模式: ${GREEN}${GOAL_FRAME_MODE}${CYAN} (base=VLN 相对点，按位置 ${BASE_GOAL_ARRIVE}m 到点) ${NC}"
 echo -e "${CYAN}   无新点看门狗: ${GREEN}${GOAL_STREAM_TIMEOUT}s${CYAN} (0=关闭)${NC}"
 echo -e "${CYAN}   RViz 可视化: ${GREEN}${ENABLE_RVIZ}${CYAN} (--vln 模式默认关闭)${NC}"
-echo -e "${CYAN}   到点阈值: ${GREEN}0.20m (与全局导航统一；VLN 相对点由发点流决定到点)${CYAN}  ${NC}"
+echo -e "${CYAN}   启动方式: ${GREEN}全部节点单独启动 (ros2 run，独立进程/日志)${NC}"
+echo -e "${CYAN}   到点阈值: ${GREEN}0.20m (与全局导航统一；VLN 相对点由发点流决定到点)${NC}  ${NC}"
 echo -e "${CYAN}================================================================${NC}"
 
-# 1. 加载 ROS 2 及机载工程环境
-echo -e "${BLUE}[1/5] 加载 ROS 2 环境与工程工作空间...${NC}"
+# ------------------------------------------------------------------------------
+# 1. 加载 ROS 2 (distro 自动检测: Foxy/Humble/Jazzy) 及机载工程环境
+# ------------------------------------------------------------------------------
+echo -e "\n${BLUE}[1/5] 加载 ROS 2 环境与工程工作空间...${NC}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 定位相机导航配置文件
@@ -204,7 +217,6 @@ else
             publish_depth_map: true
             publish_point_cloud: false
             publish_depth_info: false
-            publish_depth_confidence: false
             publish_disparity: false
         pos_tracking:
             pos_tracking_enabled: false
@@ -220,19 +232,99 @@ EOF
     fi
 fi
 
-source /opt/ros/humble/setup.bash 2>/dev/null || true
-if [ -f "$HOME/unitree_ros2/setup.sh" ]; then
-    source "$HOME/unitree_ros2/setup.sh" 2>/dev/null || true
+# --- ROS distro 自动检测 (Foxy 优先，兼容 Humble/Jazzy) ---
+if [ -z "${ROS_DISTRO:-}" ]; then
+    for _d in foxy humble jazzy; do
+        if [ -f "/opt/ros/${_d}/setup.bash" ]; then
+            ROS_DISTRO="$_d"
+            break
+        fi
+    done
 fi
-if [ -f "$HOME/bridge_ws/install/setup.bash" ]; then
-    source "$HOME/bridge_ws/install/setup.bash" 2>/dev/null || true
+if [ -z "${ROS_DISTRO:-}" ] || [ ! -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]; then
+    echo -e "${RED}[✗] 未找到 ROS 2 安装 (/opt/ros/{foxy,humble,jazzy})，请检查机载 ROS 环境。${NC}"
+    exit 1
 fi
-if [ -f "$HOME/go2w_nav_ros2_ws/install/setup.bash" ]; then
-    source "$HOME/go2w_nav_ros2_ws/install/setup.bash" 2>/dev/null || true
+echo -e "${GREEN}[✓] 检测到 ROS 2 ${ROS_DISTRO}，加载 /opt/ros/${ROS_DISTRO}/setup.bash...${NC}"
+source "/opt/ros/${ROS_DISTRO}/setup.bash"
+
+# --- 机载工作空间 (兼容 ~/agile_nav_ws/src/sru-local/ 与旧版 $HOME 布局) ---
+WS_SETUP_CANDIDATES=(
+    "$HOME/unitree_ros2/setup.sh"
+    "$HOME/bridge_ws/install/setup.bash"
+    "$HOME/go2w_nav_ros2_ws/install/setup.bash"
+    "$HOME/sru_ws/install/setup.bash"
+    "${SCRIPT_DIR}/install/setup.bash"
+    "${SCRIPT_DIR}/../go2w_nav_ros2_ws/install/setup.bash"
+    "${SCRIPT_DIR}/../bridge_ws/install/setup.bash"
+    "$(cd "${SCRIPT_DIR}/../.." 2>/dev/null && pwd)/install/setup.bash"
+)
+for ws in "${WS_SETUP_CANDIDATES[@]}"; do
+    if [ -f "$ws" ]; then
+        # shellcheck disable=SC1090
+        source "$ws" || true   # 单个工作空间加载失败不中断，由后续 ros2 可用性检查兜底
+        echo -e "${GREEN}[✓] 已加载工作空间环境: ${ws}${NC}"
+    fi
+done
+
+if ! command -v ros2 >/dev/null 2>&1; then
+    echo -e "${RED}[✗] ros2 命令不可用，请手动 source ROS 2 与机载工作空间后重试。${NC}"
+    exit 1
 fi
-if [ -f "$HOME/sru_ws/install/setup.bash" ]; then
-    source "$HOME/sru_ws/install/setup.bash" 2>/dev/null || true
+
+# --- onnxruntime / Python 环境预检 (策略节点依赖: rclpy + onnxruntime) ---
+# 优先级：
+#   1) 系统 python3 已具备 rclpy+onnxruntime → 直接用
+#   2) 既有 venv (~/ros2_onnx, 本目录 onnx_venv, ~/sru_onnx_venv) 已具备 → 用之
+#   3) pip --user 安装 onnxruntime (免 sudo，装到 ~/.local)
+#   4) 建立专用 venv (--system-site-packages 继承 ROS 的 rclpy/numpy/cv2)，仅在其中装 onnxruntime
+CTRL_PYTHON=""
+_setup_log="/tmp/sru_onnx_setup.log"
+
+python_env_ok() { # $1=解释器路径；要求同时可导入 rclpy 与 onnxruntime
+    "$1" -c "import rclpy, onnxruntime" >/dev/null 2>&1
+}
+
+find_controller_python() {
+    if python_env_ok python3; then
+        CTRL_PYTHON="python3"
+        return 0
+    fi
+    local venv
+    for venv in "$HOME/ros2_onnx/bin/python" "${SCRIPT_DIR}/onnx_venv/bin/python" "$HOME/sru_onnx_venv/bin/python"; do
+        if [ -x "$venv" ] && python_env_ok "$venv"; then
+            CTRL_PYTHON="$venv"
+            return 0
+        fi
+    done
+
+    echo -e "${YELLOW}[i] 当前 Python 缺少 onnxruntime，尝试自动安装 (pip --user，免 sudo)...${NC}"
+    if python3 -m pip install --user onnxruntime >"$_setup_log" 2>&1 && python_env_ok python3; then
+        CTRL_PYTHON="python3"
+        echo -e "${GREEN}[✓] onnxruntime 已安装到用户目录 (~/.local)，系统 python3 可用。${NC}"
+        return 0
+    fi
+
+    local venv_dir="${SCRIPT_DIR}/onnx_venv"
+    echo -e "${YELLOW}[i] pip --user 不可用，改用专用 venv: ${venv_dir} (继承 ROS 系统 site-packages)...${NC}"
+    if python3 -m venv --system-site-packages "$venv_dir" >>"$_setup_log" 2>&1 \
+        && "$venv_dir/bin/pip" install --upgrade pip setuptools wheel >>"$_setup_log" 2>&1 \
+        && "$venv_dir/bin/pip" install onnxruntime >>"$_setup_log" 2>&1 \
+        && python_env_ok "$venv_dir/bin/python"; then
+        CTRL_PYTHON="${venv_dir/bin/python}"
+        echo -e "${GREEN}[✓] 专用 venv 创建完成: ${venv_dir}${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}[✗] onnxruntime 自动安装失败，详见日志: ${_setup_log}${NC}"
+    echo -e "${RED}    请手动执行: pip3 install --user onnxruntime   (或 sudo apt install python3-pip / python3-venv 后重试)${NC}"
+    return 1
+}
+
+if ! find_controller_python; then
+    exit 1
 fi
+echo -e "${GREEN}[✓] 策略推理 Python: ${CTRL_PYTHON} (onnxruntime $(${CTRL_PYTHON} -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null || echo '?'))${NC}"
 
 # 记录所有后台进程 PID
 PIDS=()
@@ -272,71 +364,166 @@ cleanup() {
 # 注册捕获信号
 trap cleanup SIGINT SIGTERM EXIT
 
-# 2. 启动底盘控制与手柄通信桥 (统一对齐全局启动: go2w_bridge，支持按 B 停止、按 A 启动)
+# --- 工具函数：包 share 目录 / 可执行文件探测 / 后台进程存活检查 ---
+pkg_share() { # $1=包名 → 输出 share/<pkg> 路径 (未找到则空)
+    local prefix
+    prefix="$(ros2 pkg prefix "$1" 2>/dev/null || true)"
+    if [ -n "$prefix" ] && [ -d "${prefix}/share/$1" ]; then
+        echo "${prefix}/share/$1"
+    fi
+}
+
+pkg_has_exe() { # $1=包名 $2=可执行文件名 → 0/1
+    local prefix d
+    prefix="$(ros2 pkg prefix "$1" 2>/dev/null || true)"
+    [ -z "$prefix" ] && return 1
+    for d in "${prefix}/lib/$1" "${prefix}/lib"; do
+        if [ -x "${d}/$2" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_alive() { # $1=pid $2=节点名 $3=日志文件
+    if kill -0 "$1" 2>/dev/null; then
+        echo -e "${GREEN}[✓] $2 启动成功 (PID: $1，日志: $3)${NC}"
+    else
+        echo -e "${RED}[✗] $2 启动失败，日志尾部 ($3):${NC}"
+        tail -n 15 "$3" 2>/dev/null | sed 's/^/    /' || true
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# 2. 启动底盘控制与手柄通信桥 (单独启动: go2w_bridge 两节点独立进程，或 unitree_bridge 降级)
+# ------------------------------------------------------------------------------
 echo -e "\n${BLUE}[2/5] 启动底盘控制与手柄桥 (按 B 停止，按 A 启动)...${NC}"
 pkill -f "unitree_bridge" 2>/dev/null || true
 pkill -f "cmd_vel_bridge" 2>/dev/null || true
 pkill -f "wireless_controller" 2>/dev/null || true
 
 if ros2 pkg prefix go2w_bridge >/dev/null 2>&1; then
-    echo -e "${GREEN}[✓] 检测到 go2w_bridge 功能包，启动高层桥接 (cmd_vel_bridge + wireless_controller)...${NC}"
-    ros2 launch go2w_bridge go2w_bridge.launch.py > /tmp/go2w_bridge.log 2>&1 &
+    echo -e "${GREEN}[✓] 检测到 go2w_bridge 功能包，单独启动 cmd_vel_bridge + wireless_controller...${NC}"
+    ros2 run go2w_bridge cmd_vel_bridge > /tmp/go2w_cmd_vel_bridge.log 2>&1 &
     BRIDGE_PID=$!
     PIDS+=($BRIDGE_PID)
+    ros2 run go2w_bridge wireless_controller > /tmp/go2w_wireless_controller.log 2>&1 &
+    WIRELESS_PID=$!
+    PIDS+=($WIRELESS_PID)
     sleep 1
-    if kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        echo -e "${GREEN}[✓] go2w_bridge 启动成功 (PID: $BRIDGE_PID，已使能手柄 A/B 键控制)${NC}"
-    else
-        echo -e "${RED}[✗] go2w_bridge 启动失败，请检查 /tmp/go2w_bridge.log${NC}"
-    fi
+    check_alive "$BRIDGE_PID" "go2w_bridge/cmd_vel_bridge" /tmp/go2w_cmd_vel_bridge.log
+    check_alive "$WIRELESS_PID" "go2w_bridge/wireless_controller" /tmp/go2w_wireless_controller.log
 else
-    echo -e "${YELLOW}[i] 未检测到 go2w_bridge 功能包，降级启动 unitree_bridge...${NC}"
-    ros2 run unitree_bridge unitree_bridge > /tmp/unitree_bridge.log 2>&1 &
-    BRIDGE_PID=$!
-    PIDS+=($BRIDGE_PID)
-    sleep 1
-    if kill -0 "$BRIDGE_PID" 2>/dev/null; then
-        echo -e "${GREEN}[✓] unitree_bridge 启动成功 (PID: $BRIDGE_PID)${NC}"
+    echo -e "${YELLOW}[i] 未检测到 go2w_bridge 功能包，降级单独启动 unitree_bridge...${NC}"
+    if pkg_has_exe unitree_bridge unitree_bridge; then
+        ros2 run unitree_bridge unitree_bridge > /tmp/unitree_bridge.log 2>&1 &
+        BRIDGE_PID=$!
+        PIDS+=($BRIDGE_PID)
+        sleep 1
+        check_alive "$BRIDGE_PID" "unitree_bridge" /tmp/unitree_bridge.log
     else
-        echo -e "${RED}[✗] unitree_bridge 启动失败，请检查 /tmp/unitree_bridge.log${NC}"
+        echo -e "${RED}[✗] unitree_bridge 可执行文件不存在 (请确认 bridge_ws 已 colcon build 并 source)。${NC}"
+        BRIDGE_PID=""
     fi
 fi
 
-# 3. 启动 Livox MID-360 雷达与 Super LIO 地图重定位 (100% 对齐全局 start_nav.sh)
+# ------------------------------------------------------------------------------
+# 3. 启动 Livox MID-360 雷达驱动与 Super LIO 定位系统 (全部单独启动)
+# ------------------------------------------------------------------------------
 echo -e "\n${BLUE}[3/5] 启动 Livox MID-360 激光雷达硬件驱动与 Super LIO 定位系统...${NC}"
 
-# 3.1 启动 Livox MID-360 激光雷达硬件驱动
+# 3.1 启动 Livox MID-360 激光雷达硬件驱动 (单独进程)
 pkill -f "livox_ros_driver2_node" 2>/dev/null || true
-echo -e "${GREEN}[✓] 启动 Livox MID-360 雷达驱动 (ros2 launch livox_ros_driver2 msg_MID360_launch.py)...${NC}"
-ros2 launch livox_ros_driver2 msg_MID360_launch.py > /tmp/livox_lidar.log 2>&1 &
-LIVOX_PID=$!
-PIDS+=($LIVOX_PID)
-sleep 2
+LIVOX_SHARE="$(pkg_share livox_ros_driver2)"
+MID360_CFG=""
+CANDIDATE_MID360=(
+    "${LIVOX_SHARE}/config/MID360_config.json"
+    "${SCRIPT_DIR}/../bridge_ws/src/livox_ros_driver2/config/MID360_config.json"
+    "$HOME/bridge_ws/src/livox_ros_driver2/config/MID360_config.json"
+)
+for cfg in "${CANDIDATE_MID360[@]}"; do
+    if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+        MID360_CFG="$cfg"
+        break
+    fi
+done
 
-# 3.2 启动 Super-LIO 定位 (使用与全局 start_nav.sh 完全一致的 map_localization.py 发布 /lio/robo/odom)
+if pkg_has_exe livox_ros_driver2 livox_ros_driver2_node; then
+    LIVOX_ARGS=(--ros-args
+        -p xfer_format:=1
+        -p multi_topic:=0
+        -p data_src:=0
+        -p publish_freq:=10.0
+        -p output_data_type:=0
+        -p frame_id:=livox_frame)
+    [ -n "$MID360_CFG" ] && LIVOX_ARGS+=(-p "user_config_path:=${MID360_CFG}")
+    echo -e "${GREEN}[✓] 单独启动 Livox MID-360 雷达驱动 (ros2 run livox_ros_driver2 livox_ros_driver2_node)...${NC}"
+    [ -n "$MID360_CFG" ] && echo -e "${CYAN}    MID360 配置: ${MID360_CFG}${NC}"
+    ros2 run livox_ros_driver2 livox_ros_driver2_node "${LIVOX_ARGS[@]}" > /tmp/livox_lidar.log 2>&1 &
+    LIVOX_PID=$!
+    PIDS+=($LIVOX_PID)
+    sleep 2
+    check_alive "$LIVOX_PID" "livox_ros_driver2_node" /tmp/livox_lidar.log
+else
+    echo -e "${RED}[✗] livox_ros_driver2 可执行文件不存在 (请确认 bridge_ws 已 colcon build 并 source)。${NC}"
+fi
+
+# 3.2 启动 Super-LIO 定位 (单独进程: 优先 map_localization_node，降级 relocation_node)
 pkill -f "map_localization_node" 2>/dev/null || true
 pkill -f "relocation_node" 2>/dev/null || true
 
-if ros2 launch super_lio map_localization.py --show-args >/dev/null 2>&1; then
-    echo -e "${GREEN}[✓] 启动 Super-LIO 地图定位节点 (ros2 launch super_lio map_localization.py)...${NC}"
-    ros2 launch super_lio map_localization.py > /tmp/super_lio.log 2>&1 &
-    SUPER_LIO_PID=$!
-    PIDS+=($SUPER_LIO_PID)
-else
-    echo -e "${YELLOW}[i] 降级启动 super_lio relocation.py...${NC}"
-    ros2 launch super_lio relocation.py > /tmp/super_lio.log 2>&1 &
-    SUPER_LIO_PID=$!
-    PIDS+=($SUPER_LIO_PID)
+SLIO_SHARE="$(pkg_share super_lio)"
+SLIO_MODE=""
+SLIO_CFG=""
+if pkg_has_exe super_lio map_localization_node; then
+    SLIO_MODE="map_localization_node"
+    for cfg in "${SLIO_SHARE}/config/map_localization.yaml" \
+               "$(cd "${SCRIPT_DIR}/../go2w_nav_ros2_ws/src/Super-LIO-ros2/src/super_lio/config" 2>/dev/null && pwd)/map_localization.yaml"; do
+        if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+            SLIO_CFG="$cfg"
+            break
+        fi
+    done
+elif pkg_has_exe super_lio relocation_node; then
+    SLIO_MODE="relocation_node"
+    for cfg in "${SLIO_SHARE}/config/relocation.yaml"; do
+        if [ -n "$cfg" ] && [ -f "$cfg" ]; then
+            SLIO_CFG="$cfg"
+            break
+        fi
+    done
 fi
 
-# 3.3 广播 map -> world 基础静态变换 (打通全域坐标系，确保点云在 map/world 均能实时渲染)
-pkill -f "static_transform_publisher.*map.*world" 2>/dev/null || true
-nohup ros2 run tf2_ros static_transform_publisher 0.0 0.0 0.0 0.0 0.0 0.0 map world > /dev/null 2>&1 &
-MAP_TF_PID=$!
-PIDS+=($MAP_TF_PID)
-echo -e "${GREEN}[✓] 已广播坐标基准静态 TF: map -> world (PID: $MAP_TF_PID)${NC}"
+if [ -z "$SLIO_MODE" ]; then
+    echo -e "${RED}[✗] super_lio 的 map_localization_node / relocation_node 均不存在 (请确认 go2w_nav_ros2_ws 已 colcon build 并 source)。${NC}"
+else
+    # 与 launch 文件一致：节点启动前给雷达驱动 1 秒缓冲，保证首批 IMU 数据就位
+    sleep 1
+    SLIO_ARGS=(--ros-args --log-level info)
+    [ -n "$SLIO_CFG" ] && SLIO_ARGS+=(-p "$SLIO_CFG")
+    echo -e "${GREEN}[✓] 单独启动 Super-LIO 定位 (ros2 run super_lio ${SLIO_MODE})...${NC}"
+    [ -n "$SLIO_CFG" ] && echo -e "${CYAN}    定位配置: ${SLIO_CFG}${NC}"
+    ros2 run super_lio "$SLIO_MODE" "${SLIO_ARGS[@]}" > /tmp/super_lio.log 2>&1 &
+    SUPER_LIO_PID=$!
+    PIDS+=($SUPER_LIO_PID)
+    sleep 2
+    check_alive "$SUPER_LIO_PID" "super_lio/${SLIO_MODE}" /tmp/super_lio.log
 
-# 3.4 可选拉起 RViz 监控 (优先加载局部 SRU 专属预调界面 local_sru.rviz / relocation.rviz)
+    # 3.3 静态 map -> world TF：仅 relocation 模式需要 (relocation.py 即如此)。
+    #     map_localization_node 会*动态*广播该变换(漂移估计 T_M_O)，再发静态恒等变换会产生双发布者冲突，
+    #     与全局 start_nav.sh 行为保持一致。
+    if [ "$SLIO_MODE" = "relocation_node" ]; then
+        pkill -f "static_transform_publisher.*map.*world" 2>/dev/null || true
+        nohup ros2 run tf2_ros static_transform_publisher 0.0 0.0 0.0 0.0 0.0 0.0 map world > /dev/null 2>&1 &
+        MAP_TF_PID=$!
+        PIDS+=($MAP_TF_PID)
+        echo -e "${GREEN}[✓] 已广播坐标基准静态 TF: map -> world (PID: $MAP_TF_PID，relocation 模式)${NC}"
+    else
+        echo -e "${CYAN}[i] map_localization_node 会动态发布 map -> world TF，无需静态恒等变换。${NC}"
+    fi
+fi
+
+# 3.4 可选拉起 RViz 监控 (单独进程；优先加载局部 SRU 专属预调界面 local_sru.rviz / relocation.rviz)
 if [ "$ENABLE_RVIZ" = "true" ] && [ -n "${DISPLAY:-}" ]; then
     RVIZ_CFG=""
     CANDIDATE_RVIZS=(
@@ -346,6 +533,7 @@ if [ "$ENABLE_RVIZ" = "true" ] && [ -n "${DISPLAY:-}" ]; then
         "$HOME/bridge_ws/src/super_lio/super_lio/rviz/relocation.rviz"
         "$HOME/bridge_ws/install/super_lio/share/super_lio/rviz/relocation.rviz"
         "$HOME/go2w_nav_ros2_ws/src/super_lio/super_lio/rviz/relocation.rviz"
+        "${SCRIPT_DIR}/../go2w_nav_ros2_ws/src/Super-LIO-ros2/src/super_lio/rviz/map_localization.rviz"
         "$HOME/bridge_ws/src/super_lio/super_lio/rviz/lio.rviz"
         "$HOME/go2w_nav_ros2_ws/rviz.rviz"
     )
@@ -366,9 +554,11 @@ fi
 echo -e "${CYAN}    等待 4 秒等待激光雷达建流与先验地图匹配加载...${NC}"
 sleep 4
 
-# 4. 启动深度相机感知节点
+# ------------------------------------------------------------------------------
+# 4. 启动深度相机感知节点 (单独进程)
+# ------------------------------------------------------------------------------
 if [ "$CAMERA_TYPE" = "realsense" ]; then
-    echo -e "\n${BLUE}[4/5] 启动 Intel RealSense D435i 深度相机 (原生深度 640x480 + 滤波流水线)...${NC}"
+    echo -e "\n${BLUE}[4/5] 启动 Intel RealSense D435i 深度相机 (原生深度 640x480 + 滤波流水线，单独进程)...${NC}"
     pkill -f "static_transform_publisher.*camera_link" 2>/dev/null || true
     nohup ros2 run tf2_ros static_transform_publisher 0.34 0.0 0.25 0.0 0.0 0.0 base_link camera_link > /dev/null 2>&1 &
     TF_PID=$!
@@ -377,30 +567,30 @@ if [ "$CAMERA_TYPE" = "realsense" ]; then
 
     if [ -n "$RS_CONFIG_OVERRIDE" ] && [ -f "$RS_CONFIG_OVERRIDE" ]; then
         echo -e "${GREEN}[✓] 已加载 RealSense 远距覆盖配置: ${RS_CONFIG_OVERRIDE}${NC}"
-        ros2 launch realsense2_camera rs_launch.py \
-            config_file:="$RS_CONFIG_OVERRIDE" \
-            depth_module.profile:=640x480x15 \
-            rgb_camera.profile:=640x480x15 \
-            align_depth.enable:=false \
-            pointcloud.enable:=false \
-            clip_distance:=-1.0 \
-            filters:=spatial,temporal,hole_filling > /tmp/realsense_camera.log 2>&1 &
+        ros2 run realsense2_camera realsense2_camera --ros-args \
+            --params-file "$RS_CONFIG_OVERRIDE" \
+            -p depth_module.profile:=640x480x15 \
+            -p rgb_camera.profile:=640x480x15 \
+            -p align_depth.enable:=false \
+            -p pointcloud.enable:=false \
+            -p clip_distance:=-1.0 > /tmp/realsense_camera.log 2>&1 &
     else
-        ros2 launch realsense2_camera rs_launch.py \
-            depth_module.profile:=640x480x15 \
-            rgb_camera.profile:=640x480x15 \
-            align_depth.enable:=false \
-            pointcloud.enable:=false \
-            clip_distance:=-1.0 \
-            filters:=spatial,temporal,hole_filling > /tmp/realsense_camera.log 2>&1 &
+        ros2 run realsense2_camera realsense2_camera --ros-args \
+            -p depth_module.profile:=640x480x15 \
+            -p rgb_camera.profile:=640x480x15 \
+            -p align_depth.enable:=false \
+            -p pointcloud.enable:=false \
+            -p clip_distance:=-1.0 \
+            -p spatial_filter.enable:=true \
+            -p temporal_filter.enable:=true \
+            -p hole_filling_filter.enable:=true > /tmp/realsense_camera.log 2>&1 &
     fi
     CAM_PID=$!
     PIDS+=($CAM_PID)
-    echo -e "${GREEN}[✓] RealSense D435i 相机节点已在后台拉起 (PID: $CAM_PID)${NC}"
-    echo -e "${CYAN}    等待 3 秒等待相机曝光与驱动流水线初始化...${NC}"
     sleep 3
+    check_alive "$CAM_PID" "realsense2_camera" /tmp/realsense_camera.log
 else
-    echo -e "\n${BLUE}[4/5] 启动 ZED 2i 双目深度相机感知 (纯深度图加速模式)...${NC}"
+    echo -e "\n${BLUE}[4/5] 启动 ZED 2i 双目深度相机感知 (纯深度图加速模式，单独进程)...${NC}"
     pkill -f "static_transform_publisher.*zed_camera_link" 2>/dev/null || true
     nohup ros2 run tf2_ros static_transform_publisher 0.257 0.0 0.28 0.0 0.0 0.0 base_link zed_camera_link > /dev/null 2>&1 &
     TF_PID=$!
@@ -409,22 +599,23 @@ else
 
     if [ -n "$ZED_CONFIG_OVERRIDE" ] && [ -f "$ZED_CONFIG_OVERRIDE" ]; then
         echo -e "${GREEN}[✓] 已加载轻量化覆盖配置: ${ZED_CONFIG_OVERRIDE}${NC}"
-        ros2 launch zed_wrapper zed_camera.launch.py \
-            camera_model:=zed2i \
-            ros_params_override_path:="$ZED_CONFIG_OVERRIDE" > /tmp/zed_camera.log 2>&1 &
+        ros2 run zed_wrapper zed_camera --ros-args \
+            -p camera_model:=zed2i \
+            -p "ros_params_override_path:=${ZED_CONFIG_OVERRIDE}" > /tmp/zed_camera.log 2>&1 &
     else
         echo -e "${YELLOW}[!] 未指定覆盖配置，使用默认参数启动相机...${NC}"
-        ros2 launch zed_wrapper zed_camera.launch.py \
-            camera_model:=zed2i > /tmp/zed_camera.log 2>&1 &
+        ros2 run zed_wrapper zed_camera --ros-args \
+            -p camera_model:=zed2i > /tmp/zed_camera.log 2>&1 &
     fi
     CAM_PID=$!
     PIDS+=($CAM_PID)
-    echo -e "${GREEN}[✓] ZED 2i 相机节点已在后台拉起 (PID: $CAM_PID)${NC}"
-    echo -e "${CYAN}    等待 4 秒等待相机曝光与立体匹配初始化...${NC}"
     sleep 4
+    check_alive "$CAM_PID" "zed_camera" /tmp/zed_camera.log
 fi
 
-# 5. 前台启动 SRU 强化学习端到端避障导航策略
+# ------------------------------------------------------------------------------
+# 5. 前台启动 SRU 强化学习端到端避障导航策略 (使用预检通过的 Python 环境)
+# ------------------------------------------------------------------------------
 echo -e "\n${CYAN}================================================================${NC}"
 echo -e "${GREEN}  前置系统组件已就绪，正在启动：SRU 强化学习导航策略！  ${NC}"
 echo -e "${CYAN}  深度图像话题: ${GREEN}${DEPTH_TOPIC}${NC}"
@@ -452,7 +643,9 @@ fi
 
 # 优先直接使用源码执行，彻底规避 colcon build setuptools entry_points 缓存脱节
 CANDIDATE_SCRIPTS=(
-    # ~/go2w_nav_ros2_ws 是 sync_to_go2w_nav.sh 实际更新的工作空间，优先使用
+    # ~/agile_nav_ws/src/sru-local/ 布局 (Foxy 机载)：go2w_nav_ros2_ws 与本脚本同级
+    "${SCRIPT_DIR}/../go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
+    # 旧版 $HOME 直接布局
     "$HOME/go2w_nav_ros2_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
     "$HOME/sru_ws/src/sru-robot-deployment/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
     "$HOME/sru_ws/src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py"
@@ -483,7 +676,8 @@ if [ -n "$SRC_SCRIPT" ]; then
     SRC_PKG_DIR="$(dirname "$(dirname "$SRC_SCRIPT")")"
     echo -e "${GREEN}[✓] 直接加载最新策略源码: ${SRC_SCRIPT}${NC}"
     export PYTHONPATH="${SRC_PKG_DIR}:${PYTHONPATH:-}"
-    python3 -u "$SRC_SCRIPT" "${POLICY_MODEL_ARG[@]}" "${FORWARD_ARGS[@]}" \
+    set +e   # 前台节点退出码需完整捕获，交给 cleanup/RET_CODE 处理
+    "$CTRL_PYTHON" -u "$SRC_SCRIPT" "${POLICY_MODEL_ARG[@]}" "${FORWARD_ARGS[@]}" \
       --ros-args \
       -p depth_topic:=${DEPTH_TOPIC} \
       -p min_depth:=${CAMERA_MIN_DEPTH} \
@@ -496,6 +690,7 @@ if [ -n "$SRC_SCRIPT" ]; then
       -r /dlio/odom_node/odom:=/lio/robo/odom \
       -r /path_manager/path_manager_ros/nav_vel:=/cmd_vel
     RET_CODE=$?
+    set -e
 else
     ros2 run rl_nav_controller rl_nav_controller "${POLICY_MODEL_ARG[@]}" "${FORWARD_ARGS[@]}" \
       --ros-args \
@@ -509,6 +704,7 @@ else
       -p base_goal_arrive_threshold:=${BASE_GOAL_ARRIVE} \
       -r /dlio/odom_node/odom:=/lio/robo/odom \
       -r /path_manager/path_manager_ros/nav_vel:=/cmd_vel
+    set +e
     RET_CODE=$?
 fi
 

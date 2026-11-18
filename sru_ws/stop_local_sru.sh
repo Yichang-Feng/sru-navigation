@@ -13,7 +13,13 @@ NC='\033[0m'
 echo -e "${YELLOW}[!] 正在安全停止局部 SRU 导航系统所有节点...${NC}"
 
 # 1. 立即发布底盘制动锁，确保机器人立刻停止运动
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+# ROS distro 自动检测 (Foxy/Humble/Jazzy)
+for _d in foxy humble jazzy; do
+    if [ -f "/opt/ros/${_d}/setup.bash" ]; then
+        source "/opt/ros/${_d}/setup.bash" 2>/dev/null || true
+        break
+    fi
+done
 ros2 topic pub /motion_enabled std_msgs/msg/Bool "{data: false}" --once >/dev/null 2>&1 || true
 ros2 topic pub /startNavi std_msgs/msg/Bool "{data: false}" --once >/dev/null 2>&1 || true
 
