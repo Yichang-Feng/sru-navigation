@@ -2,7 +2,7 @@
 
 > 对应论文：*Spatially-enhanced recurrent memory for long-range mapless navigation via end-to-end reinforcement learning*（IJRR 2025）
 > 本文档合并自原 `SRU_NAVIGATION_EXPLAINED.md`（架构总览）与 `NAVIGATION_TRAINING_DESIGN.md`（任务设计），基于 `sru-navigation-learning` / `sru-navigation-sim` 的实际代码整理。
-> 训练实操（5-Phase 课程、超参矩阵、导出命令）见同目录 `go2w_nav_refactor_plan.md`；指标解读见 `TRAINING_MONITORING.md`。
+> 训练实操（5-Phase 课程、超参矩阵、导出命令）见同目录 `go2w_nav_refactor_plan.md`；指标解读见 `docs/training/TRAINING_MONITORING.md`。
 
 ---
 
@@ -466,7 +466,7 @@ PPO/MDPO 更新: 5 epochs × 4 mini-batches (轨迹级切分, 重放时恢复隐
 典型失败模式排查：长期成功率不涨且 `closest_distance` 不缩小 → 检查深度特征是否接入（VAE 权重路径）、
 γ 是否被改小、目标观测的 Δ噪声是否过大。
 
-指标的详细物理含义、公式与健康区间见 `TRAINING_MONITORING.md`。
+指标的详细物理含义、公式与健康区间见 `docs/training/TRAINING_MONITORING.md`。
 
 ---
 

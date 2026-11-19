@@ -1,7 +1,7 @@
 # 训练命令速查与 TensorBoard 指标解读
 
 > 合并自原 `CLI_REFERENCE.md` 与 `TENSORBOARD_METRICS_GUIDE.md`。
-> 任务设计原理见 `NAVIGATION_MDP.md`；训练流程与超参见 `go2w_nav_refactor_plan.md`。
+> 任务设计原理见 `docs/structure/NAVIGATION_MDP.md`；训练流程与超参见 `docs/structure/go2w_nav_refactor_plan.md`。
 > 奖励权重以代码 `navigation_env_cfg.py` 为准（Go2W 与 B2W 有差异，见 §3 表下注解）。
 
 ---
@@ -80,7 +80,7 @@ cd IsaacLab
 python scripts/rsl_rl/train.py --task Go2W-Navigation-MDPo
 ```
 
-Go2W 的 5-Phase 课程训练命令见 `go2w_nav_refactor_plan.md`（`train_go2w_scratch.sh` / `continue_go2w.sh`）。
+Go2W 的 5-Phase 课程训练命令见 `docs/structure/go2w_nav_refactor_plan.md`（`train_go2w_scratch.sh` / `continue_go2w.sh`）。
 
 ### 5. 其他常用
 

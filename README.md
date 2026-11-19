@@ -66,12 +66,17 @@ sru-navigation-learning/
 │   ├── test_global_nav_integration.py # 全局导航集成测试
 │   └── benchmark/                 #   性能基准测试工具
 │
-├── docs/                          # 📚 训练与算法文档
-│   ├── go2w_nav_refactor_plan.md  #   Go2W 5-Phase 训练全指南（必读）
-│   ├── NAVIGATION_MDP.md          #   架构总览 + MDP 设计原理
-│   ├── TRAINING_MONITORING.md     #   命令速查 + 训练指标解读
-│   ├── ADAPTIVE_LOOKAHEAD.md      #   双因子自适应前瞻（含窄门）
-│   └── B2W_HEADING_CONTROL_HANDOVER.md # 航向控制（B2W 参考）
+├── docs/                          # 📚 文档（按子目录分类）
+│   ├── structure/                 #   架构与设计
+│   │   ├── go2w_nav_refactor_plan.md      # Go2W 5-Phase 训练全指南（必读）
+│   │   ├── NAVIGATION_MDP.md              # 架构总览 + MDP 设计原理
+│   │   ├── ADAPTIVE_LOOKAHEAD.md          # 双因子自适应前瞻（含窄门）
+│   │   └── local_planner_status_diagram.html # 局部规划器状态图
+│   ├── training/                  #   训练指南与监控
+│   │   ├── TRAINING_MONITORING.md         # 命令速查 + 训练指标解读
+│   │   └── B2W_HEADING_CONTROL_HANDOVER.md # 航向控制（B2W 参考）
+│   ├── test/                      #   测试方案与实验分析报告
+│   └── deployment/                #   部署评测与参数整定方案
 │
 ├── config/                        # 📋 训练配置
 │   └── dummy_config.yaml          #   PPO 超参数示例
@@ -108,7 +113,7 @@ conda activate isaaclab  # 或你的实际环境名
 
 ### 1.2 Go2W 5-Phase 课程训练
 
-Go2W 采用从简单到复杂的 5 阶段递进课程（详见 [docs/go2w_nav_refactor_plan.md](docs/go2w_nav_refactor_plan.md)）：
+Go2W 采用从简单到复杂的 5 阶段递进课程（详见 [docs/structure/go2w_nav_refactor_plan.md](docs/structure/go2w_nav_refactor_plan.md)）：
 
 | Phase | 迭代范围 | 地形 | 前向速度 |
 |:---:|:---|:---|:---|
@@ -146,7 +151,7 @@ conda activate isaaclab
 # Tensorboard（推荐）
 tensorboard --logdir IsaacLab/logs/rsl_rl/go2w_navigation_ppo
 
-# 指标解读参考 docs/TRAINING_MONITORING.md
+# 指标解读参考 docs/training/TRAINING_MONITORING.md
 ```
 
 ---
@@ -292,11 +297,11 @@ ros2 topic pub /goal_pose geometry_msgs/PoseStamped "..." --once
 ### 训练与算法
 | 文档 | 内容 |
 |:---|:---|
-| [docs/go2w_nav_refactor_plan.md](docs/go2w_nav_refactor_plan.md) | 🔑 **Go2W 5-Phase 训练完全指南**（超参数、课程设计、调参建议） |
-| [docs/NAVIGATION_MDP.md](docs/NAVIGATION_MDP.md) | 架构总览 + MDP 设计原理（奖励、终止、观测） |
-| [docs/TRAINING_MONITORING.md](docs/TRAINING_MONITORING.md) | 命令速查 + 训练曲线与指标解读 |
-| [docs/ADAPTIVE_LOOKAHEAD.md](docs/ADAPTIVE_LOOKAHEAD.md) | 双因子自适应前瞻（含窄门） |
-| [docs/B2W_HEADING_CONTROL_HANDOVER.md](docs/B2W_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制（B2W 参考实现） |
+| [docs/structure/go2w_nav_refactor_plan.md](docs/structure/go2w_nav_refactor_plan.md) | 🔑 **Go2W 5-Phase 训练完全指南**（超参数、课程设计、调参建议） |
+| [docs/structure/NAVIGATION_MDP.md](docs/structure/NAVIGATION_MDP.md) | 架构总览 + MDP 设计原理（奖励、终止、观测） |
+| [docs/training/TRAINING_MONITORING.md](docs/training/TRAINING_MONITORING.md) | 命令速查 + 训练曲线与指标解读 |
+| [docs/structure/ADAPTIVE_LOOKAHEAD.md](docs/structure/ADAPTIVE_LOOKAHEAD.md) | 双因子自适应前瞻（含窄门） |
+| [docs/training/B2W_HEADING_CONTROL_HANDOVER.md](docs/training/B2W_HEADING_CONTROL_HANDOVER.md) | 终点朝向控制（B2W 参考实现） |
 
 ### 实机部署
 > 部署代码与文档已迁至独立仓库 `sru-robot-deployment`（与本仓库同级目录，或 https://github.com/leggedrobotics/sru-robot-deployment）。
