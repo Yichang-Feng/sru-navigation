@@ -127,6 +127,17 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             self.declare_parameter('terminal_heading_drift_tol', 0.40)
         if not self.has_parameter('terminal_heading_stable_frames'):
             self.declare_parameter('terminal_heading_stable_frames', 2)
+        # 到点转身的对齐门槛（独立于 segment_arrive_threshold）：
+        #   距离 <= enter_dist 才允许转身；转身过程中距离 > abort_dist（扣除纯旋转引起的
+        #   里程计位置漂移后）就放弃转身、直接完成目标。
+        if not self.has_parameter('terminal_align_enter_dist'):
+            self.declare_parameter('terminal_align_enter_dist', 0.20)
+        if not self.has_parameter('terminal_align_abort_dist'):
+            self.declare_parameter('terminal_align_abort_dist', 0.40)
+        # 纯原地旋转时，里程计原点（约在头部/IMU）绕机体中心画弧，报告位置会平移
+        #   2 * lever_arm * |sin(dpsi/2)|。这个量不是真实位移，判定 drift 时要扣掉。
+        if not self.has_parameter('terminal_align_lever_arm'):
+            self.declare_parameter('terminal_align_lever_arm', 0.55)
 
         self.enable_terminal_heading_align = bool(self.get_parameter('enable_terminal_heading_align').value)
         self.terminal_heading_tol = float(self.get_parameter('terminal_heading_tol').value)
@@ -137,12 +148,25 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.terminal_heading_timeout = float(self.get_parameter('terminal_heading_timeout').value)
         self.terminal_heading_drift_tol = float(self.get_parameter('terminal_heading_drift_tol').value)
         self.terminal_heading_stable_frames = int(self.get_parameter('terminal_heading_stable_frames').value)
+        self.terminal_align_enter_dist = float(self.get_parameter('terminal_align_enter_dist').value)
+        self.terminal_align_abort_dist = float(self.get_parameter('terminal_align_abort_dist').value)
+        self.terminal_align_lever_arm = float(self.get_parameter('terminal_align_lever_arm').value)
+        if (self.enable_terminal_heading_align
+                and getattr(self, 'segment_arrive_threshold', 0.20) > self.terminal_align_enter_dist + 1e-6):
+            self.get_logger().warn(
+                '\033[93m' +
+                f'[TerminalHeading] segment_arrive_threshold={self.segment_arrive_threshold:.2f}m '
+                f'> terminal_align_enter_dist={self.terminal_align_enter_dist:.2f}m：'
+                '到点时会直接完成、不进入转身对齐。要把 --arrive-thresh 调到 <= enter_dist。' +
+                '\033[0m')
 
         self.is_aligning_heading = False
         self.heading_align_target_yaw = None
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
+        self.heading_align_entry_pos = None
+        self.heading_align_entry_yaw = None
 
         # Diagnostic publishers
         self.is_stair_pub = self.create_publisher(Bool, '/nav/is_descending_stairs', 10)
@@ -168,6 +192,8 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
+        self.heading_align_entry_pos = None
+        self.heading_align_entry_yaw = None
         self._prev_stair_state = False
         self._prev_stair_up_state = False
         super().global_path_callback(path_msg)
@@ -180,6 +206,8 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
+        self.heading_align_entry_pos = None
+        self.heading_align_entry_yaw = None
         self.path_tracker.clear()
         self.target_pos_w = None
         self.target_yaw_w = None
@@ -212,26 +240,43 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             self._finish_terminal_goal(reason="Terminal heading alignment timed out")
             return
 
-        # 2. Position drift guard
-        if self.heading_align_terminal_pos is not None:
-            drift_dist = float(np.linalg.norm(
-                np.array(curr_robot_pos[:2]) - np.array(self.heading_align_terminal_pos[:2])
-            ))
-            if drift_dist > self.terminal_heading_drift_tol:
-                self.get_logger().warn(
-                    f'[TerminalHeading] Position drift detected ({drift_dist:.2f}m > {self.terminal_heading_drift_tol:.2f}m). '
-                    'Forcing stop and completing goal to prevent drift.'
-                )
-                self._finish_terminal_goal(reason=f"Terminal goal completed on drift threshold ({drift_dist:.2f}m)")
-                return
-
-        # 3. Calculate yaw error (wrap to [-pi, pi])
+        # 2. Calculate yaw error (wrap to [-pi, pi]) — needed before the position guard
         qw, qx, qy, qz = (
             float(curr_robot_ori[0]), float(curr_robot_ori[1]),
             float(curr_robot_ori[2]), float(curr_robot_ori[3])
         )
         robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
         target_yaw = self.heading_align_target_yaw
+
+        # 3. Position guard: 到目标点的距离，扣除纯旋转造成的里程计位置漂移
+        #    （里程计原点偏头部，原地转 dpsi 会让报告位置平移 2*lever*sin(dpsi/2)）
+        if self.heading_align_terminal_pos is not None:
+            d_goal = float(np.linalg.norm(
+                np.array(curr_robot_pos[:2]) - np.array(self.heading_align_terminal_pos[:2])
+            ))
+            rot_artifact = 0.0
+            if self.heading_align_entry_yaw is not None:
+                dpsi = math.atan2(
+                    math.sin(robot_yaw - self.heading_align_entry_yaw),
+                    math.cos(robot_yaw - self.heading_align_entry_yaw),
+                )
+                rot_artifact = 2.0 * abs(self.terminal_align_lever_arm) * abs(math.sin(0.5 * dpsi))
+            allowed = self.terminal_align_abort_dist + rot_artifact
+            if d_goal > allowed:
+                self.get_logger().warn(
+                    f'[TerminalHeading] 距离目标 {d_goal:.2f}m 超过上限 {allowed:.2f}m '
+                    f'(旋转补偿 {rot_artifact:.2f}m)。放弃转身，直接完成目标。'
+                )
+                self._finish_terminal_goal(
+                    reason=f"Terminal goal completed: distance {d_goal:.2f}m > "
+                           f"{self.terminal_align_abort_dist:.2f}m (+{rot_artifact:.2f}m rot)")
+                return
+            if d_goal > self.terminal_align_abort_dist:
+                self.get_logger().info(
+                    f'[TerminalHeading] 距离目标 {d_goal:.2f}m，超出 {self.terminal_align_abort_dist:.2f}m，'
+                    f'但属于原地旋转造成的里程计漂移（补偿 {rot_artifact:.2f}m），继续对齐。',
+                    throttle_duration_sec=1.0,
+                )
 
         yaw_err = math.atan2(math.sin(target_yaw - robot_yaw), math.cos(target_yaw - robot_yaw))
 
@@ -411,6 +456,9 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         robot_yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
 
                     yaw_err = math.atan2(math.sin(terminal_yaw - robot_yaw), math.cos(terminal_yaw - robot_yaw))
+                    d_goal = float(np.linalg.norm(
+                        np.array(robot_xy[:2]) - np.array(terminal_pt[:2])
+                    )) if terminal_pt is not None else float('inf')
                     if abs(yaw_err) <= self.terminal_heading_tol:
                         self.get_logger().info(
                             '\033[92m' +
@@ -422,6 +470,22 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                             reason=f"Terminal goal reached (< {self.segment_arrive_threshold}m, heading within {math.degrees(self.terminal_heading_tol):.1f}°)"
                         )
                         return
+                    elif d_goal > self.terminal_align_enter_dist:
+                        # 到点判定的阈值（segment_arrive_threshold）比转身门槛宽：
+                        # 此时离目标还远，原地转身只会把位置判据搞乱，直接完成不转身。
+                        self.get_logger().warn(
+                            '\033[93m' +
+                            f'[Path] Arrived within {self.segment_arrive_threshold:.2f}m but {d_goal:.2f}m from the terminal '
+                            f'(> {self.terminal_align_enter_dist:.2f}m enter threshold). '
+                            f'Heading err={math.degrees(yaw_err):.1f}°, skipping heading alignment. '
+                            'Set --arrive-thresh <= terminal_align_enter_dist to enable it.' +
+                            '\033[0m'
+                        )
+                        self._finish_terminal_goal(
+                            reason=f"Terminal goal reached ({d_goal:.2f}m > enter_dist "
+                                   f"{self.terminal_align_enter_dist:.2f}m, no heading align)"
+                        )
+                        return
                     else:
                         self._stop_robot()
                         self.is_aligning_heading = True
@@ -429,6 +493,8 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         self.heading_align_terminal_pos = list(terminal_pt[:2]) if terminal_pt else list(robot_xy)
                         self.heading_align_start_time = self.robot_odom_time
                         self.heading_align_stable_count = 0
+                        self.heading_align_entry_pos = list(robot_xy[:2])
+                        self.heading_align_entry_yaw = robot_yaw
                         self.path_tracker.clear()
                         self.target_pos_w = None
                         self.target_yaw_w = None
@@ -436,7 +502,8 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         self.slope_gate.reset()
                         self.get_logger().info(
                             '\033[93m' +
-                            f'[Path] Arrived at terminal position (< {self.segment_arrive_threshold}m). '
+                            f'[Path] Arrived at terminal position (dist={d_goal:.2f}m <= '
+                            f'{self.terminal_align_enter_dist:.2f}m). '
                             f'Current heading err={math.degrees(yaw_err):.1f}° > {math.degrees(self.terminal_heading_tol):.1f}°. '
                             f'Entering terminal heading alignment phase (state stays RUNNING).' +
                             '\033[0m'
@@ -549,9 +616,13 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                 )
                 self.target_pos_w = carrot_pt
                 self.target_yaw_w = carrot_yaw
+                self._publish_adaptive_debug(debug_info)
                 self.get_logger().info(
-                    f'[AdaptiveLookahead][{debug_info.get("mode", "both")}] L={debug_info.get("lookahead", 0.0):.2f}m '
-                    f'(curv={debug_info.get("l_curv", 0.0):.2f}m, clear={debug_info.get("l_clear", 0.0):.2f}m, '
+                    f'[AdaptiveLookahead][{debug_info.get("mode", "both")}/{debug_info.get("switch_mode", "curvature")}] '
+                    f'L={debug_info.get("lookahead", 0.0):.2f}m '
+                    f'(target={debug_info.get("l_target", 0.0):.2f}m, '
+                    f'curv={debug_info.get("l_curv", 0.0):.2f}m, clear={debug_info.get("l_clear", 0.0):.2f}m, '
+                    f'dcorner={debug_info.get("d_corner", 0.0):.2f}m, '
                     f'turn={debug_info.get("turn_deg", 0.0):.1f}°, narrow={debug_info.get("in_narrow", False)})',
                     throttle_duration_sec=1.0
                 )

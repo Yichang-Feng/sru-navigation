@@ -262,7 +262,8 @@ flowchart TD
 为了简化系统逻辑，下层**取消了原先 `paused` 与 `stop` 的多余区分，统一整合为 `stopped`**：
 
 1. **自动保留当前路径（Path Retention by Default）**：当上层发布 `/mission/control: "stop"` 时，控制器执行紧急主动制动（速度置零），进入 `stopped` 状态；内部路径追踪器（`path_tracker`）**默认完整保留未跑完路径和进度弧长 s**，不予清除；后续上层只要发送 `/mission/control: "continue"`，状态自动恢复为 `running`，机器狗立刻从暂停点无缝继续跑完剩余路径。
-2. **接收新路径自动覆盖（New Path Preemption & Override）**：无论机器人当前处于 `running` 推进中、还是 `stopped` 停止中、亦或是 `failed` 停滞中；一旦上层下发了新的 `/global_path`，控制器**无条件优先以最新路径为准**：清除旧路径、载入新路径并重置进度（s=0）与停滞探测器、状态自动跃迁为 `running` 开始推进。
+2. **接收新路径自动覆盖（New Path Preemption & Override）**：无论机器人当前处于 `running` 推进中、还是 `stopped` 停止中、亦或是 `failed` 停滞中；一旦上层下发了新的 `/global_path`（或 `/goal_3d` 单目标），控制器**优先以最新目标为准**：载入新路径并重置进度（s=0）与停滞探测器，状态跃迁为 `running` 开始推进。
+   **唯一例外——手动暂停锁存（manual pause latched）**：若暂停来自现场 B 键 / 底盘 `motion_enabled=False` / `/mission/control: "pause"`，且尚未按 A（或发送 `resume`）解除，则收到新目标时**只更新内存中的目标与路径并保持 `stopped`**，不会自启。否则底盘门（`joystick_control_`）仍关闭，机器狗无法移动，4.0s 后停滞检测会误报 `{"state":"failed"}`——这正是"按 B 停下后重新下发路径、未立刻按 A 就报 failed"的成因。
 3. **彻底取消任务（Explicit Cancel）**：若现场手柄按下 ABORT 紧急取消键，或上层下发**空路径** (`Path(poses=[])`)，控制器将彻底清空路径缓存，刹停并保持在 `stopped` 状态。
 
 ```mermaid

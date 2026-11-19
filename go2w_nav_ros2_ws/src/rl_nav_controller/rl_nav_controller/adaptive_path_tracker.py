@@ -312,6 +312,12 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
     3. Slew-rate limiting for smooth lookahead transitions.
     """
 
+    # Resolution used to build the distance-to-corner table (see
+    # compute_corner_distance_lookahead). Matches the offline analysis so the
+    # replay and the robot agree.
+    CORNER_RESAMPLE_STEP = 0.05
+    CORNER_HEADING_HALF = 0.30
+
     def __init__(
         self,
         logger=None,
@@ -324,7 +330,11 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
         slew_rate_increase=0.8,
         passage_latch_dist=1.2,
         clearance_threshold=1.05,
-        adaptive_mode="both"
+        adaptive_mode="both",
+        switch_mode="curvature",
+        corner_switch_thresh_deg=25.0,
+        corner_switch_margin=0.25,
+        corner_switch_max_dist=6.0,
     ):
         super().__init__(logger=logger)
         self.lookahead_min = float(lookahead_min)
@@ -337,6 +347,13 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
         self.passage_latch_dist = float(passage_latch_dist)
         self.clearance_threshold = float(clearance_threshold)
         self.adaptive_mode = self._normalize_adaptive_mode(adaptive_mode)
+        self.switch_mode = self._normalize_switch_mode(switch_mode)
+        self.corner_switch_thresh_deg = float(corner_switch_thresh_deg)
+        self.corner_switch_margin = float(corner_switch_margin)
+        self.corner_switch_max_dist = float(corner_switch_max_dist)
+        self._corner_s = None
+        self._corner_table = None
+        self._corner_key = None
 
         # Dynamic state
         self.current_lookahead = self.lookahead_max
@@ -362,12 +379,110 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
         """Dynamically update adaptive mode."""
         self.adaptive_mode = self._normalize_adaptive_mode(mode)
 
+    @staticmethod
+    def _normalize_switch_mode(mode):
+        """Normalize switch rule: 'curvature' | 'corner_dist' | 'hybrid'.
+
+        curvature    forward sliding-window accumulated turn (historical rule);
+        corner_dist  L = clamp(d_corner - margin, Lmin, Lmax), where d_corner is
+                     the distance along the path until the heading deviates by
+                     corner_switch_thresh_deg;
+        hybrid       min(curvature, corner_dist).
+        """
+        if mode is None:
+            return "curvature"
+        m = str(mode).strip().lower()
+        if m in ("corner_dist", "corner", "distance", "dc_dist", "dcorner"):
+            return "corner_dist"
+        if m in ("hybrid", "min", "both"):
+            return "hybrid"
+        return "curvature"
+
+    def set_switch_mode(self, mode):
+        """Dynamically update the lookahead switching rule."""
+        self.switch_mode = self._normalize_switch_mode(mode)
+
+    def set_corner_switch(self, thresh_deg=None, margin=None, max_dist=None):
+        """Update the corner-distance rule parameters and invalidate the table."""
+        if thresh_deg is not None:
+            self.corner_switch_thresh_deg = float(thresh_deg)
+        if margin is not None:
+            self.corner_switch_margin = float(margin)
+        if max_dist is not None:
+            self.corner_switch_max_dist = float(max_dist)
+        self._corner_s = None
+        self._corner_table = None
+        self._corner_key = None
+
+    def _build_corner_table(self):
+        """Resample the path and tabulate distance-to-next-corner at every sample.
+
+        d_corner(s) = arc length ahead of s until the smoothed path heading first
+        deviates from the heading at s by >= corner_switch_thresh_deg. Equals
+        corner_switch_max_dist when the path stays straight for that far.
+        """
+        self._corner_s = None
+        self._corner_table = None
+        self._corner_key = (len(self.points), float(self.corner_switch_thresh_deg),
+                            float(self.corner_switch_max_dist))
+        if not self.is_active() or len(self.points) < 2:
+            return
+
+        P = np.array([p[:2] for p in self.points], dtype=np.float64)
+        cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(P, axis=0), axis=1))])
+        total = float(cum[-1])
+        if total < 1e-6:
+            return
+
+        step = self.CORNER_RESAMPLE_STEP
+        s = np.arange(0.0, total + 1e-9, step)
+        pts = np.stack([np.interp(s, cum, P[:, 0]), np.interp(s, cum, P[:, 1])], axis=1)
+
+        n = max(1, int(round(self.CORNER_HEADING_HALF / step)))
+        lo = np.clip(np.arange(len(pts)) - n, 0, len(pts) - 1)
+        hi = np.clip(np.arange(len(pts)) + n, 0, len(pts) - 1)
+        v = pts[hi] - pts[lo]
+        headings = np.arctan2(v[:, 1], v[:, 0])
+
+        look = max(1, int(round(self.corner_switch_max_dist / step)))
+        thresh = math.radians(self.corner_switch_thresh_deg)
+        table = np.full(len(headings), float(self.corner_switch_max_dist))
+        for k in range(len(headings)):
+            lim = min(len(headings), k + look + 1)
+            dev = np.abs((headings[k:lim] - headings[k] + math.pi) % (2.0 * math.pi) - math.pi)
+            hit = np.where(dev >= thresh)[0]
+            if len(hit):
+                table[k] = float(hit[0]) * step
+
+        self._corner_s = s
+        self._corner_table = table
+
+    def compute_corner_distance_lookahead(self, from_progress):
+        """Lookahead from the distance to the next corner.
+
+        Returns:
+            tuple: (l_corner, d_corner)
+        """
+        key = (len(self.points), float(self.corner_switch_thresh_deg),
+               float(self.corner_switch_max_dist))
+        if self._corner_s is None or self._corner_key != key:
+            self._build_corner_table()
+        if self._corner_s is None:
+            return self.lookahead_max, float(self.corner_switch_max_dist)
+
+        d = float(np.interp(from_progress, self._corner_s, self._corner_table))
+        l = max(self.lookahead_min, min(self.lookahead_max, d - self.corner_switch_margin))
+        return l, d
+
     def reset_adaptive_state(self, initial_lookahead=None):
         """Reset internal adaptive lookahead state."""
         self.current_lookahead = initial_lookahead if initial_lookahead is not None else self.lookahead_max
         self.last_update_time = None
         self.is_in_narrow_passage = False
         self.narrow_passage_entry_s = -float("inf")
+        self._corner_s = None
+        self._corner_table = None
+        self._corner_key = None
 
     def set_path(self, points, terminal_yaw=None, frame_id='map', *args, **kwargs):
         ret = super().set_path(points, terminal_yaw=terminal_yaw, frame_id=frame_id, *args, **kwargs)
@@ -520,11 +635,25 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
             return None, None, {}
 
         # 1. Compute curvature-based factor (if enabled by mode)
+        d_corner = float(self.corner_switch_max_dist)
         if self.adaptive_mode in ("both", "curvature_only"):
-            l_curv, turn_deg, max_seg_turn_deg = self.compute_path_curvature_lookahead(
-                from_progress=self.current_progress,
-                window_dist=self.window_dist
-            )
+            if self.switch_mode == "corner_dist":
+                l_curv, d_corner = self.compute_corner_distance_lookahead(self.current_progress)
+                turn_deg, max_seg_turn_deg = 0.0, 0.0
+            elif self.switch_mode == "hybrid":
+                l_curv_c, turn_deg, max_seg_turn_deg = self.compute_path_curvature_lookahead(
+                    from_progress=self.current_progress,
+                    window_dist=self.window_dist
+                )
+                l_curv_d, d_corner = self.compute_corner_distance_lookahead(self.current_progress)
+                l_curv = min(l_curv_c, l_curv_d)
+            else:
+                l_curv, turn_deg, max_seg_turn_deg = self.compute_path_curvature_lookahead(
+                    from_progress=self.current_progress,
+                    window_dist=self.window_dist
+                )
+                # Telemetry only: logged so every rule can be scored offline
+                _, d_corner = self.compute_corner_distance_lookahead(self.current_progress)
         else:
             l_curv, turn_deg, max_seg_turn_deg = self.lookahead_max, 0.0, 0.0
 
@@ -567,10 +696,12 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
 
         debug_info = {
             "mode": str(self.adaptive_mode),
+            "switch_mode": str(self.switch_mode),
             "lookahead": float(self.current_lookahead),
             "l_target": float(l_target),
             "l_curv": float(l_curv),
             "l_clear": float(l_clear),
+            "d_corner": float(d_corner),
             "turn_deg": float(turn_deg),
             "in_narrow": bool(in_narrow),
             "clearance_w": float(clearance_w),

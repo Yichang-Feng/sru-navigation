@@ -5,13 +5,14 @@
 #
 # 默认配置（当前实测最佳设计）：
 #   1. 导航策略：RL 楼梯感知与双因子自适应控制器 (rl_nav_controller_stairs)
-#   2. 平地前瞻模式：--curv-only (Path 曲率转弯自适应，避免走廊双侧墙壁被视觉误判)
+#   2. 平地前瞻：--curv-only + --min 0.4 + --switch-mode corner_dist
+#      (按"到下一个拐角的距离"收缩前瞻；避免走廊双侧墙壁被深度误判为窄门)
 #   3. 楼梯感知模式：3D 路径坡度门控，下楼前瞻锁存 0.40m，原始深度图直接下楼 (无虚假阻挡)
 #   4. 容错与状态机：规范 6 状态流转，保留停滞超时报错 (REPORT_FAILURE="true")
 #   5. RViz 可视化：默认不自动弹出 (ENABLE_RVIZ=false)，支持通过 --rviz 参数开启
 #
 # 用法：
-#   ./start_nav.sh                     # 默认启动当前最优导航系统 (curv-only + 楼梯感知 0.4m)
+#   ./start_nav.sh                     # 默认启动当前最优导航系统 (curv-only + corner_dist + 楼梯感知 0.4m)
 #   ./start_nav.sh --rviz              # 启动并自动弹出 RViz
 #   ./start_nav.sh --remapping         # 开启楼梯深度图重映射处理
 #   ./start_nav.sh -h                  # 查看帮助
@@ -31,9 +32,19 @@ ROS_SETUP="/opt/ros/humble/setup.bash"
 CAMERA_TYPE="realsense"         # 相机选择: "realsense" (默认, Intel RealSense D435/D435i) | "zed" (Stereolabs ZED 2i)
 ENABLE_ADAPTIVE="true"
 ADAPTIVE_MODE="curvature_only"  # 默认使用 curvature_only，避免窄走廊双侧墙壁被视觉误判为窄门导致前瞻锁死在 0.5m
-LOOKAHEAD_MIN="0.5"
+LOOKAHEAD_MIN="0.4"
 LOOKAHEAD_MAX="2.0"
 WINDOW_DIST="1.6"
+TURN_ANGLE_LOW="20.0"   # 曲率自适应下阈值 (deg)：小于它认为是直道
+TURN_ANGLE_HIGH="50.0"  # 曲率自适应上阈值 (deg)：大于它前瞻直接收到 lookahead_min
+SWITCH_MODE="corner_dist" # 前瞻切换规则: corner_dist (默认) | curvature | hybrid
+CORNER_THRESH="25.0"    # corner_dist: 路径航向偏离该角度即视为"拐角" (deg)
+CORNER_MARGIN="0.25"    # corner_dist: 在拐角前多少米开始收缩前瞻 (m)
+SLEW_INC="0.8"          # 前瞻恢复速率 (m/s)：决定出弯/出窄门后多快回到长前瞻
+SLEW_DEC="2.5"          # 前瞻收缩速率 (m/s)
+ALIGN_ENTER="0.20"      # 到点转身：距离 <= 该值才允许转身
+ALIGN_ABORT="0.40"      # 到点转身：距离 > 该值（扣除纯旋转漂移后）则放弃转身
+ALIGN_LEVER="0.55"      # 到点转身：里程计原点相对旋转中心的杠杆臂 (m)，用于扣除原地旋转的位置漂移
 DOOR_SPEED_BOOST="0.0"
 REPORT_FAILURE="true"           # 默认启用停滞报错上报 (标准状态机)
 ENABLE_RVIZ=false               # 默认不自动弹出 RViz (按要求关闭)
@@ -67,11 +78,22 @@ show_help() {
     echo "  --realsense | --d435 使用 Intel RealSense D435/D435i 深度相机 (默认)"
     echo "  --zed               使用 Stereolabs ZED 2i 深度相机 (可选)"
     echo "  --camera <类型>     显式指定相机类型: zed | realsense"
-    echo "  --curv-only         仅保留 Path 曲率转弯判断 + 楼梯感知 (防平地视觉误判)"
+    echo "  --curv-only         仅保留基于路径的自适应前瞻 + 楼梯感知 (防平地深度误判)"
     echo "  --door-only         仅保留局部窄门净空感知 + 楼梯感知"
     echo "  --mode <模式>        显式指定自适应模式: both | curvature_only | clearance_only | none"
-    echo "  --min <距离>        平地自适应前瞻下界 (默认 0.5m)"
+    echo "  --min <距离>        平地自适应前瞻下界 (默认 0.4m)"
     echo "  --max <距离>        平地自适应前瞻上界 (默认 2.0m)"
+    echo "  --window <距离>      曲率自适应前瞻窗口长度 (默认 1.6m, 建议不要 >2.0)"
+    echo "  --turn-low <角度>     曲率自适应下阈值 deg (默认 20, 小于它视为直道)"
+    echo "  --turn-high <角度>    曲率自适应上阈值 deg (默认 50, 大于它前瞻直接收到 min)"
+    echo "  --switch-mode <规则>  前瞻切换规则: corner_dist (默认) | curvature | hybrid"
+    echo "  --corner-thresh <角度> corner_dist: 路径航向偏离该角度视为拐角 (默认 25 deg)"
+    echo "  --corner-margin <距离> corner_dist: 拐角前多少米开始收缩前瞻 (默认 0.25m)"
+    echo "  --slew-inc <速率>     前瞻恢复速率 m/s (默认 0.8, 出弯恢复快慢的关键)"
+    echo "  --slew-dec <速率>     前瞻收缩速率 m/s (默认 2.5)"
+    echo "  --align-enter <距离>  到点转身进入距离 (默认 0.20m, 需 --arrive-thresh <= 此值)"
+    echo "  --align-abort <距离>  到点转身放弃距离 (默认 0.40m, 已扣除原地旋转漂移)"
+    echo "  --align-lever <距离>  里程计杠杆臂 (默认 0.55m, 原地旋转位置漂移补偿)"
     echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.20m)"
     echo "  --heading-align     开启终端航向对齐 (默认开启)"
     echo "  --no-heading-align  禁用终端航向对齐 (到达坐标即完成)"
@@ -195,6 +217,46 @@ while [[ $# -gt 0 ]]; do
             WINDOW_DIST="$2"
             shift 2
             ;;
+        --turn-low)
+            TURN_ANGLE_LOW="$2"
+            shift 2
+            ;;
+        --turn-high)
+            TURN_ANGLE_HIGH="$2"
+            shift 2
+            ;;
+        --switch-mode)
+            SWITCH_MODE="$2"
+            shift 2
+            ;;
+        --corner-thresh)
+            CORNER_THRESH="$2"
+            shift 2
+            ;;
+        --corner-margin)
+            CORNER_MARGIN="$2"
+            shift 2
+            ;;
+        --slew-inc)
+            SLEW_INC="$2"
+            shift 2
+            ;;
+        --slew-dec)
+            SLEW_DEC="$2"
+            shift 2
+            ;;
+        --align-enter)
+            ALIGN_ENTER="$2"
+            shift 2
+            ;;
+        --align-abort)
+            ALIGN_ABORT="$2"
+            shift 2
+            ;;
+        --align-lever)
+            ALIGN_LEVER="$2"
+            shift 2
+            ;;
         --no-adaptive)
             ENABLE_ADAPTIVE="false"
             ADAPTIVE_MODE="none"
@@ -269,6 +331,7 @@ echo ">>> Unitree Go2W 楼梯感知与双因子自适应导航系统启动器"
 echo ">>> 感知相机: $CAMERA_TYPE (可在启动时通过 --realsense 或 --zed 切换)"
 echo ">>> 楼梯感知使能: $ENABLE_STAIRS [下楼前瞻: ${STAIR_LOOKAHEAD}m, 上楼前瞻: ${STAIR_UP_LOOKAHEAD}m, 深度重映射: ${ENABLE_STAIR_REMAPPING}, 下坡阈值: ${STAIR_SLOPE_THRESH}, 上坡阈值: ${STAIR_UP_SLOPE_THRESH}, 到达阈值: ${SEGMENT_ARRIVE_THRESHOLD}m]"
 echo ">>> 平地前瞻自适应使能: $ENABLE_ADAPTIVE [模式: $ADAPTIVE_MODE, 范围: ${LOOKAHEAD_MIN}m ~ ${LOOKAHEAD_MAX}m]"
+echo ">>> 前瞻切换规则: $SWITCH_MODE [拐角阈值: ${CORNER_THRESH}°, 提前量: ${CORNER_MARGIN}m, 窗口: ${WINDOW_DIST}m, 恢复/收缩: ${SLEW_INC}/${SLEW_DEC} m/s]"
 echo ">>> 容错模式: $REPORT_FAILURE, 自动打开 RViz: $ENABLE_RVIZ"
 echo "=================================================================="
 
@@ -355,6 +418,16 @@ if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
         -p lookahead_min:=${LOOKAHEAD_MIN} \
         -p lookahead_max:=${LOOKAHEAD_MAX} \
         -p adaptive_window_dist:=${WINDOW_DIST} \
+        -p turn_angle_low_deg:=${TURN_ANGLE_LOW} \
+        -p turn_angle_high_deg:=${TURN_ANGLE_HIGH} \
+        -p switch_mode:=${SWITCH_MODE} \
+        -p corner_switch_thresh_deg:=${CORNER_THRESH} \
+        -p corner_switch_margin:=${CORNER_MARGIN} \
+        -p slew_rate_increase:=${SLEW_INC} \
+        -p slew_rate_decrease:=${SLEW_DEC} \
+        -p terminal_align_enter_dist:=${ALIGN_ENTER} \
+        -p terminal_align_abort_dist:=${ALIGN_ABORT} \
+        -p terminal_align_lever_arm:=${ALIGN_LEVER} \
         -p door_speed_boost:=${DOOR_SPEED_BOOST} \
         -p segment_arrive_threshold:=${SEGMENT_ARRIVE_THRESHOLD} \
         -p enable_terminal_heading_align:=${ENABLE_HEADING_ALIGN} \

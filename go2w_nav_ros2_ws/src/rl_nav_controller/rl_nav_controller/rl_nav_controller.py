@@ -49,6 +49,24 @@ except ImportError:
     HAS_TF2 = False
 
 
+def motion_enable_subscription_qos():
+    """QoS for subscribing to the chassis ``/motion_enabled`` gate (B/A buttons).
+
+    The subscription must be at least as permissive as the publisher. The
+    chassis bridges publish this topic VOLATILE (``unitree_bridge`` uses the
+    rclcpp defaults; ``go2w_bridge`` latches it TRANSIENT_LOCAL). Requesting
+    TRANSIENT_LOCAL here makes the pairing with a VOLATILE publisher fail the
+    QoS compatibility check, so every B/A event is silently dropped: pressing
+    B stops the chassis but the controller keeps RUNNING, and the next path or
+    goal then trips the 4 s stall detector and reports a spurious ``failed``.
+    """
+    return QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+
+
 # --------------------------------------------------------------------------------
 # Learning model - RL Navigation Controller (ONNX Runtime)
 # --------------------------------------------------------------------------------
@@ -490,6 +508,11 @@ class NavigationPolicyNode(Node):
         self.motion_enable_publisher = self.create_publisher(
             Bool, self.motion_enable_topic, motion_enable_qos
         )
+        # The subscriber must be at least as permissive as the publisher: the
+        # chassis bridge's /motion_enabled is VOLATILE by default, and a
+        # TRANSIENT_LOCAL request is rejected by QoS compatibility checks, which
+        # silently dropped every B/A event (pause was invisible to this node).
+        motion_enable_sub_qos = motion_enable_subscription_qos()
         self.lookahead_marker_publisher = self.create_publisher(
             Marker, '/vis/lookahead_goal', 10
         )
@@ -542,7 +565,7 @@ class NavigationPolicyNode(Node):
             String, self.stop_topic, self.mission_control_callback, 10
         )
         self.motion_enable_subscriber = self.create_subscription(
-            Bool, self.motion_enable_topic, self.motion_enable_callback, motion_enable_qos
+            Bool, self.motion_enable_topic, self.motion_enable_callback, motion_enable_sub_qos
         )
 
         # Utilities
@@ -648,7 +671,7 @@ class NavigationPolicyNode(Node):
         status_heartbeat_interval = 1.0 / max(0.1, self.status_heartbeat_freq)
         self.create_timer(status_heartbeat_interval, self.publish_status_heartbeat)
 
-        # 5Hz sensor watchdog timer (monitors ZED camera depth frames)
+        # 5Hz sensor watchdog timer (monitors depth camera frames)
         self.create_timer(0.2, self.check_sensor_health)
 
         # 10Hz VLN goal-stream watchdog: brake when no new base-frame goal arrives
@@ -869,7 +892,7 @@ class NavigationPolicyNode(Node):
             self.publish_status_message()
 
     def check_sensor_health(self):
-        """Safety watchdog: monitor ZED depth camera frames and trigger error on timeout."""
+        """Safety watchdog: monitor depth camera frames and trigger error on timeout."""
         if self.state == NavState.RUNNING:
             now = time.time()
             if self.last_depth_time is None:
@@ -882,17 +905,17 @@ class NavigationPolicyNode(Node):
                     self._stop_robot()
                     self.set_state(
                         NavState.ERROR,
-                        reason=f"ZED camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
-                        error_msg="zed_camera_lost"
+                        reason=f"Camera depth frame timeout ({elapsed:.1f}s > {self.camera_timeout:.1f}s)",
+                        error_msg="camera_lost"
                     )
                     self.get_logger().error(
                         '\033[91m' +
-                        f'[Safety Watchdog] ZED camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="zed_camera_lost").' +
+                        f'[Safety Watchdog] Camera depth frames lost ({elapsed:.1f}s > {self.camera_timeout:.1f}s)! Robot stopped, state -> ERROR (msgs="camera_lost").' +
                         '\033[0m'
                     )
                 else:
                     self.get_logger().warn(
-                        f'[Safety Watchdog] ZED camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
+                        f'[Safety Watchdog] Camera depth frame delayed ({elapsed:.1f}s > {self.camera_timeout:.1f}s), waiting for frame (report_failure=False)...',
                         throttle_duration_sec=3.0
                     )
 
@@ -1172,7 +1195,7 @@ class NavigationPolicyNode(Node):
             self._stop_robot()
             self.get_logger().error(
                 '\033[91m' +
-                f'[Path Rejected] Cannot accept new path: ZED camera is lost (state=ERROR, msgs="{self.error_msg}"). ' +
+                f'[Path Rejected] Cannot accept new path: camera is lost (state=ERROR, msgs="{self.error_msg}"). ' +
                 'Robot cannot navigate without visual perception. Please restart terminal or recover camera.' +
                 '\033[0m'
             )
@@ -1259,8 +1282,16 @@ class NavigationPolicyNode(Node):
         self.path_tracker.set_path(pts, terminal_yaw=terminal_yaw)
         self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
 
-        # 5) State transition to RUNNING (unless currently STOPPED)
-        if self.state == NavState.STOPPED:
+        # 5) State transition to RUNNING (unless a manual pause is latched)
+        #    A latched pause (B / motion gate / mission pause) means the chassis
+        #    gate is still closed: auto-running here would only feed the stall
+        #    detector and report a spurious `failed` 4 s later.
+        if self.state == NavState.STOPPED or self.user_pause_latched:
+            if self.state != NavState.STOPPED:
+                self.set_state(
+                    NavState.STOPPED,
+                    reason="New path received while the manual pause is latched"
+                )
             self._stop_robot()
             self.get_logger().info(
                 '\033[93m' +
@@ -2168,7 +2199,24 @@ class NavigationPolicyNode(Node):
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
-        self.set_state(NavState.RUNNING, reason="Single goal received")
+        if self.user_pause_latched:
+            # A manual pause (B / motion gate / mission pause) must not be
+            # overridden by a newly dispatched goal: the chassis gate is still
+            # closed, so starting RUNNING here would only feed the 4 s stall
+            # detector and report a spurious `failed`. Keep the goal latched
+            # and stay STOPPED until A / resume.
+            self.set_state(
+                NavState.STOPPED,
+                reason="Single goal received while the manual pause is latched"
+            )
+            self.get_logger().info(
+                '\033[93m' +
+                'New target received, but the robot stays STOPPED (manual pause latched). '
+                'Press A / resume to continue.' +
+                '\033[0m'
+            )
+        else:
+            self.set_state(NavState.RUNNING, reason="Single goal received")
         self.get_logger().info(
             '\033[92m' +
             f'Received new target position: [{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}], ' +

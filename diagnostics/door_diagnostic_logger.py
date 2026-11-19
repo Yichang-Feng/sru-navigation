@@ -263,6 +263,9 @@ class DoorDiagnosticLogger(Node):
         raw_depth_every: int = 1,
         record_rgb: bool = False,
         rgb_topic: str = DEFAULT_RGB_TOPIC,
+        auto_stop: bool = True,
+        auto_stop_frames: int = 5,
+        auto_stop_idle_frames: int = 10,
     ):
         super().__init__('door_diagnostic_logger')
 
@@ -285,6 +288,20 @@ class DoorDiagnosticLogger(Node):
         self.raw_depth_every = max(1, int(raw_depth_every))
         self.record_rgb = bool(record_rgb)
         self.rgb_topic = rgb_topic
+
+        # --- 到点自动停止录制（默认开启） ---
+        # 触发 A：按 A 出发后见过 goal_reached，且 cmd 连续 N 帧为 0
+        # 触发 B：没见到 goal_reached，但 cmd=0 且 nav_state=idle 连续 M 帧
+        # 中途按 B 暂停时 nav_state=stopped，不会误触发
+        self.auto_stop = bool(auto_stop)
+        self.auto_stop_frames = max(1, int(auto_stop_frames))
+        self.auto_stop_idle_frames = max(1, int(auto_stop_idle_frames))
+        self._task_armed = False
+        self._goal_seen = False
+        self._zero_cmd_frames = 0
+        self._auto_stop_requested = False
+        self._auto_stop_reason = ''
+        self._auto_stop_shutdown_sent = False
 
         self.scene = scene.strip()
         self.note = note.strip()
@@ -427,6 +444,7 @@ class DoorDiagnosticLogger(Node):
             # --- Adaptive / stairs debug (optional topics) ---
             "adaptive_lookahead", "adaptive_l_curv", "adaptive_l_clear", "adaptive_l_target",
             "adaptive_turn_deg", "adaptive_in_narrow", "adaptive_clearance_w",
+            "adaptive_switch_mode", "adaptive_d_corner",
             "stair_gate_slope", "stair_gate_dz", "stair_remap_active",
 
             # --- Misc ---
@@ -588,6 +606,7 @@ class DoorDiagnosticLogger(Node):
         # 7) Timers
         self.create_timer(1.0, self._status_heartbeat_cb)
         self.create_timer(2.0, self._tf_snapshot_cb)
+        self.create_timer(0.2, self._auto_stop_watchdog_cb)
 
         if self.enable_lidar and pc2 is None and CustomMsg is None:
             self.get_logger().warn(
@@ -642,7 +661,10 @@ class DoorDiagnosticLogger(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(String, self.status_topic, self.status_cb, status_qos)
-        self.create_subscription(String, '/nav/adaptive_debug', self.adaptive_debug_cb, 10)
+        # Best-effort matches the controller's publisher, so a busy logger can
+        # never block the control loop through a RELIABLE writer's history.
+        debug_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(String, '/nav/adaptive_debug', self.adaptive_debug_cb, debug_qos)
         self.create_subscription(String, '/nav/stairs_debug', self.stairs_debug_cb, 10)
 
         # Depth camera: auto listen to both, or the explicitly requested topic.
@@ -821,6 +843,8 @@ class DoorDiagnosticLogger(Node):
                 state = raw.strip()
             self.nav_state = state
             self.nav_state_msgs = msgs
+            if state.lower() in ('goal_reached', 'arrived', 'goal') and self._task_armed:
+                self._goal_seen = True
             self.nav_state_counts[state] = self.nav_state_counts.get(state, 0) + 1
             self.last_status_time = time.time()
         except Exception:
@@ -1092,6 +1116,11 @@ class DoorDiagnosticLogger(Node):
         if (now - self.last_record_epoch) < (1.0 / self.record_rate):
             return
         self.last_record_epoch = now
+
+        # 到点后不再落盘；触发的那一帧仍会写完整，便于离线按 cmd=0 裁剪
+        if self._auto_stop_requested:
+            return
+        self._check_auto_stop(now)
 
         # Decode depth: RealSense 16UC1 (mm), ZED 32FC1 (m).
         try:
@@ -1484,6 +1513,8 @@ class DoorDiagnosticLogger(Node):
             _fmt(adaptive.get('turn_deg'), "{:.1f}"),
             _bool_str(adaptive.get('in_narrow')),
             _fmt(adaptive.get('clearance_w')),
+            adaptive.get('switch_mode', ''),
+            _fmt(adaptive.get('d_corner')),
             _fmt(stairs_dbg.get('slope')), _fmt(stairs_dbg.get('dz')),
             _bool_str(stairs_dbg.get('remap_active')),
 
@@ -1674,6 +1705,9 @@ class DoorDiagnosticLogger(Node):
                     'min_depth': self.min_depth,
                     'max_depth': self.max_depth,
                     'record_rate': self.record_rate,
+                    'auto_stop': self.auto_stop,
+                    'auto_stop_frames': self.auto_stop_frames,
+                    'auto_stop_idle_frames': self.auto_stop_idle_frames,
                     'scene': self.scene,
                     'note': self.note,
                     'operator': self.operator,
@@ -1711,6 +1745,10 @@ class DoorDiagnosticLogger(Node):
                 'controller_min_depth': self.controller_min_depth,
                 'controller_max_depth': self.controller_max_depth,
                 'record_rate': self.record_rate,
+                'auto_stop': self.auto_stop,
+                'auto_stop_reason': self._auto_stop_reason,
+                'auto_stop_frames': self.auto_stop_frames,
+                'auto_stop_idle_frames': self.auto_stop_idle_frames,
                 'scene': self.scene,
                 'note': self.note,
                 'operator': self.operator,
@@ -1861,6 +1899,45 @@ class DoorDiagnosticLogger(Node):
         )
         sys.stdout.flush()
 
+    def _check_auto_stop(self, now):
+        """在 depth 回调里判断任务是否已结束；只置标志，不在这里关节点。"""
+        if not self.auto_stop or self._auto_stop_requested:
+            return False
+        vx, vy, wz = self.last_cmd
+        if abs(vx) > 0.01 or abs(vy) > 0.01 or abs(wz) > 0.01:
+            # 出发前 cmd 恒 0；一旦非零就武装
+            self._task_armed = True
+            self._zero_cmd_frames = 0
+            return False
+        if not self._task_armed:
+            return False
+
+        self._zero_cmd_frames += 1
+        state = (self.nav_state or '').lower()
+        reason = ''
+        if self._goal_seen and self._zero_cmd_frames >= self.auto_stop_frames:
+            reason = f'goal_reached + cmd=0 ({self._zero_cmd_frames} frames)'
+        elif state == 'idle' and self._zero_cmd_frames >= self.auto_stop_idle_frames:
+            reason = f'nav_state=idle + cmd=0 ({self._zero_cmd_frames} frames)'
+        if not reason:
+            return False
+
+        self._auto_stop_requested = True
+        self._auto_stop_reason = reason
+        self.get_logger().info(
+            f'[AutoStop] 任务结束，停止录制（{reason}）；正在收尾保存 ...')
+        return True
+
+    def _auto_stop_watchdog_cb(self):
+        """从定时器里退出 spin，避免在订阅回调中调用 rclpy.shutdown。"""
+        if not self._auto_stop_requested or self._auto_stop_shutdown_sent:
+            return
+        self._auto_stop_shutdown_sent = True
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
     def close(self):
         if getattr(self, '_closed', False):
             return
@@ -1900,6 +1977,9 @@ class DoorDiagnosticLogger(Node):
             'average_fps': round(avg_fps, 2),
             'dropped_queue_frames': self.dropped_queue_frames,
             'record_rate_setting': self.record_rate,
+            'auto_stop': self.auto_stop,
+            'auto_stop_reason': self._auto_stop_reason or None,
+            'stop_frame': self.frame_idx,
             'total_csv_columns': len(self.csv_headers),
             'distance_traveled_m': round(self.agg['distance'], 3),
             'mean_speed_mps': round(self.agg['speed_sum'] / n, 3),
@@ -2016,6 +2096,12 @@ def main():
                         help='每 N 帧保存一次原始深度 PNG（默认 1；长时录制可设为 5/10）')
     parser.add_argument('--record-rgb', action='store_true', help='同时保存 RGB 图像（可选）')
     parser.add_argument('--rgb-topic', type=str, default=DEFAULT_RGB_TOPIC)
+    parser.add_argument('--no-auto-stop', action='store_true',
+                        help='禁用到点自动停止（异常运行、需要保留暂停后的恢复段时用）')
+    parser.add_argument('--auto-stop-frames', type=int, default=5,
+                        help='见到 goal_reached 后连续 N 帧 cmd=0 即停（默认 5，约 1 s）')
+    parser.add_argument('--auto-stop-idle-frames', type=int, default=10,
+                        help='未见 goal_reached 时 cmd=0 且 idle 连续 M 帧即停（默认 10，约 2 s）')
 
     parsed, unknown = parser.parse_known_args()
     if unknown:
@@ -2059,6 +2145,9 @@ def main():
         raw_depth_every=parsed.raw_depth_every,
         record_rgb=parsed.record_rgb,
         rgb_topic=parsed.rgb_topic,
+        auto_stop=not parsed.no_auto_stop,
+        auto_stop_frames=parsed.auto_stop_frames,
+        auto_stop_idle_frames=parsed.auto_stop_idle_frames,
     )
 
     try:
@@ -2066,9 +2155,14 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if node._auto_stop_reason:
+            print(f'\n[AutoStop] 自动停止原因: {node._auto_stop_reason}')
         node.close()
         node.destroy_node()
-        rclpy.shutdown()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
