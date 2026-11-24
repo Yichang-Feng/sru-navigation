@@ -221,6 +221,10 @@ if [ "$ENABLE_LOCAL_PLANNER" = true ]; then
 fi
 
 if [ "$ENABLE_RL_LOCAL_PLANNER" = true ]; then
+    if ! python3 -c "import onnxruntime as o,sys; p=o.get_available_providers(); sys.exit(0 if ('CUDAExecutionProvider' in p or 'TensorrtExecutionProvider' in p) else 1)" 2>/dev/null; then
+        echo -e "\033[33m[!] 当前 python3 没有 CUDA/TensorRT EP，rl_nav_controller 将使用 CPU 推理，CPU 占用会明显升高。\033[0m"
+        echo -e "\033[33m    修复: python3 -m pip uninstall -y onnxruntime onnxruntime-gpu && python3 -m pip install --user onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126\033[0m"
+    fi
     RL_ARGS="--ros-args -p enable_adaptive_lookahead:=${ENABLE_ADAPTIVE} -p adaptive_mode:=${ADAPTIVE_MODE} -p lookahead_min:=${LOOKAHEAD_MIN} -p lookahead_max:=${LOOKAHEAD_MAX} -p adaptive_window_dist:=${WINDOW_DIST} -p door_speed_boost:=${DOOR_SPEED_BOOST} -p report_failure:=${REPORT_FAILURE}"
     # 自动兼容：优先检测 ros2 entrypoint，若尚未编译注册则无缝回退到 python3 源码直运，100% 防止 'no executable found'
     RL_CMD="if ros2 pkg executables rl_nav_controller 2>/dev/null | grep -q 'rl_nav_controller_adaptive'; then ros2 run rl_nav_controller rl_nav_controller_adaptive $RL_ARGS; else python3 src/rl_nav_controller/rl_nav_controller/rl_nav_controller_adaptive.py $RL_ARGS; fi"

@@ -112,10 +112,14 @@ class LearningModel:
         # Determine available execution providers
         available_providers = ort.get_available_providers()
 
-        # Prefer CUDA if available, otherwise use CPU
+        # Prefer CUDA, then TensorRT (Jetson wheels often expose only TensorRT),
+        # otherwise CPU.
         if 'CUDAExecutionProvider' in available_providers:
             providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
             print('\033[92m' + 'Using device: CUDA (ONNX Runtime)' + '\033[0m')
+        elif 'TensorrtExecutionProvider' in available_providers:
+            providers = ['TensorrtExecutionProvider', 'CPUExecutionProvider']
+            print('\033[92m' + 'Using device: TensorRT (ONNX Runtime)' + '\033[0m')
         else:
             providers = ['CPUExecutionProvider']
             print('\033[93m' + 'Using device: CPU (ONNX Runtime)' + '\033[0m')
@@ -123,7 +127,8 @@ class LearningModel:
         # Session options for optimization
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.intra_op_num_threads = 4
+        # CPU 推理时少占线程，避免和 Super-LIO/相机/录包抢 CPU
+        sess_options.intra_op_num_threads = 4 if providers[0] != 'CPUExecutionProvider' else 2
 
         # Load ONNX models
         self.preprocess_session = ort.InferenceSession(
@@ -694,6 +699,10 @@ class NavigationPolicyNode(Node):
         self.goal_is_relative = False   # True while following base-frame (VLN) goals
         self.last_goal_rx_time = None   # wall-clock time of the latest base-frame goal
         self.user_pause_latched = False  # True after B / motion-disable / mission pause
+        # Last /motion_enabled value (True = chassis gate open). While the gate is
+        # closed the robot physically cannot move, so a "no progress" window is not
+        # a blockage and must never be reported as FAILED.
+        self.chassis_motion_enabled = True
 
         # Joystick state
         self.joy_linear_x = 0.0
@@ -860,6 +869,14 @@ class NavigationPolicyNode(Node):
 
     def unlock_chassis(self):
         """Auto unlock chassis gate by publishing True to /motion_enabled and /startNavi."""
+        if getattr(self, 'user_pause_latched', False):
+            # Never let the auto-unlock publish undo a manual pause (B): its own
+            # /motion_enabled=True would otherwise come back to this node and
+            # resume the paused path.
+            self.get_logger().warn(
+                '\033[93m[Auto-Unlock] Skipped: manual pause is latched; press A to resume.\033[0m'
+            )
+            return
         msg = Bool()
         msg.data = True
         if hasattr(self, 'start_navi_publisher') and self.start_navi_publisher is not None:
@@ -867,6 +884,7 @@ class NavigationPolicyNode(Node):
         if hasattr(self, 'motion_enable_publisher') and self.motion_enable_publisher is not None:
             self.motion_enable_publisher.publish(msg)
         self.chassis_unlocked = True
+        self.chassis_motion_enabled = True
         self.get_logger().info(
             '\033[92m' + f'[Auto-Unlock] Chassis gate unlocked: published {self.motion_enable_topic} & {self.start_navi_topic} = True' + '\033[0m'
         )
@@ -875,6 +893,7 @@ class NavigationPolicyNode(Node):
         """Lock chassis gate by publishing False to /motion_enabled and /startNavi on shutdown."""
         if self.auto_unlock_bridge and getattr(self, 'chassis_unlocked', False):
             self.chassis_unlocked = False
+            self.chassis_motion_enabled = False
             try:
                 msg = Bool()
                 msg.data = False
@@ -898,9 +917,21 @@ class NavigationPolicyNode(Node):
         3. External safety monitor or bridge toggles motion enable.
         """
         enabled = bool(msg.data)
-        self.user_pause_latched = not enabled
+        was_enabled = bool(getattr(self, 'chassis_motion_enabled', True))
+        self.chassis_motion_enabled = enabled
+        now = time.monotonic()
+        # A duplicate is the same A press delivered twice (two bridges) or a
+        # replayed sample; it must not count as a new resume request.
+        duplicate_true = enabled and (now - getattr(
+            self, '_last_motion_enable_true_time', -1.0e9)) < 0.4
+        if enabled:
+            self._last_motion_enable_true_time = now
+        self.get_logger().info(
+            f'[MotionGate] {self.motion_enable_topic}={enabled} (state={self.state.value})'
+        )
 
         if not enabled:
+            self.user_pause_latched = True
             # Motion disabled (e.g. Unitree controller button B pressed): Transition to STOPPED
             if self.state in (NavState.RUNNING, NavState.IDLE, NavState.FAILED):
                 self.is_abort_goal = False
@@ -912,8 +943,17 @@ class NavigationPolicyNode(Node):
                     '\033[93m[MotionGate] Chassis motion disabled: State set to STOPPED (cmd_vel=0, path retained in memory).\033[0m'
                 )
         else:
-            # Motion enabled (e.g. Unitree controller button A pressed): If currently in STOPPED state and a valid path exists, resume RUNNING
+            # A duplicate True must never undo a paused robot: that would return
+            # it to RUNNING while the chassis gate is still closed, and its 4 s
+            # stall window would then report a spurious FAILED.
+            if self.state == NavState.STOPPED and self.user_pause_latched and duplicate_true:
+                self.get_logger().info(
+                    '\033[93m[MotionGate] Duplicate /motion_enabled=True while paused: ignored '
+                    '(only a fresh A press resumes).\033[0m'
+                )
+                return
             if self.state == NavState.STOPPED:
+                self.user_pause_latched = False
                 if hasattr(self, 'path_tracker') and self.path_tracker.has_path():
                     self.is_abort_goal = False
                     self.goal_reached_latched = False
@@ -930,9 +970,22 @@ class NavigationPolicyNode(Node):
                     )
                 else:
                     self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path -> IDLE")
+            elif not was_enabled:
+                # Fresh A edge in any other state: it clears the pause intent.
+                self.user_pause_latched = False
 
     def set_state(self, new_state: NavState, reason: str = "", error_msg: str = ""):
         """Transition navigation state and trigger immediate event-driven status dispatch."""
+        # STOPPED is a pause latch: per the state diagram its only exit is an
+        # explicit resume (A / "resume") back to RUNNING. Never let it fall
+        # through into FAILED, no matter which watchdog fires.
+        if self.state == NavState.STOPPED and new_state == NavState.FAILED:
+            self.get_logger().error(
+                '\033[91m[NavState] Refused illegal transition stopped -> failed'
+                + (f' ({reason})' if reason else '')
+                + '. STOPPED can only be resumed explicitly (A / resume).\033[0m'
+            )
+            return
         if self.state != new_state or (new_state == NavState.ERROR and error_msg != self.error_msg):
             old_state = self.state
             self.state = new_state
@@ -1565,7 +1618,12 @@ class NavigationPolicyNode(Node):
 
             # Check if blocked / stalled against obstacles -> Transition to FAILED
             robot_vel_xy = self.linear_vel[:2] if self.linear_vel else [0.0, 0.0]
-            if self.blocked_detector.update(self.robot_odom_time, progress_s, robot_vel_xy):
+            if not self.chassis_motion_enabled:
+                # Chassis gate closed (B / motion disabled): the robot is not allowed
+                # to move, so no progress is expected. Keep the window fresh and never
+                # report a stall — STOPPED can only be left by an explicit resume.
+                self.blocked_detector.reset(self.robot_odom_time, progress_s)
+            elif self.blocked_detector.update(self.robot_odom_time, progress_s, robot_vel_xy):
                 if self.report_failure:
                     self._stop_robot()
                     self.set_state(

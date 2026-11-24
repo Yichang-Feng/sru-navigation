@@ -274,57 +274,100 @@ fi
 
 # --- onnxruntime / Python 环境预检 (策略节点依赖: rclpy + onnxruntime) ---
 # 优先级：
-#   1) 系统 python3 已具备 rclpy+onnxruntime → 直接用
-#   2) 既有 venv (~/ros2_onnx, 本目录 onnx_venv, ~/sru_onnx_venv) 已具备 → 用之
-#   3) pip --user 安装 onnxruntime (免 sudo，装到 ~/.local)
-#   4) 建立专用 venv (--system-site-packages 继承 ROS 的 rclpy/numpy/cv2)，仅在其中装 onnxruntime
+#   1) 已有 CUDA/TensorRT EP 的解释器 → 直接用
+#   2) 既有 venv 里有 GPU EP → 用之
+#   3) pip --user 安装 onnxruntime-gpu（Jetson 默认走 NVIDIA 索引）
+#   4) 建立专用 venv (--system-site-packages) 后安装 onnxruntime-gpu
+#   5) 以上都失败时才退回 CPU 版，并明确警告
 CTRL_PYTHON=""
 _setup_log="/tmp/sru_onnx_setup.log"
+
+# Jetson 上 PyPI 的 onnxruntime-gpu 通常没有 aarch64 wheel，默认走 NVIDIA 索引；
+# 可用 ONNX_PIP_INDEX_URL 覆盖（如 jp5/cu118、jp6/cu122、jp6/cu126）。
+ONNX_PIP_INDEX_URL="${ONNX_PIP_INDEX_URL:-}"
+if [ -z "$ONNX_PIP_INDEX_URL" ] && [ "$(uname -m)" = "aarch64" ]; then
+    ONNX_PIP_INDEX_URL="https://pypi.jetson-ai-lab.dev/jp6/cu126"
+fi
 
 python_env_ok() { # $1=解释器路径；要求同时可导入 rclpy 与 onnxruntime
     "$1" -c "import rclpy, onnxruntime" >/dev/null 2>&1
 }
 
+python_has_gpu_ep() { # $1=解释器路径；有 CUDA 或 TensorRT EP
+    "$1" -c "import onnxruntime as o,sys; p=o.get_available_providers(); sys.exit(0 if ('CUDAExecutionProvider' in p or 'TensorrtExecutionProvider' in p) else 1)" >/dev/null 2>&1
+}
+
+onnx_device() { # $1=解释器路径
+    "$1" -c "import onnxruntime as o; p=o.get_available_providers(); print('CUDA' if 'CUDAExecutionProvider' in p else ('TensorRT' if 'TensorrtExecutionProvider' in p else 'CPU'))" 2>/dev/null || echo '?'
+}
+
+_onnx_index_args() {
+    if [ -n "$ONNX_PIP_INDEX_URL" ]; then
+        printf '%s\n' "--extra-index-url" "$ONNX_PIP_INDEX_URL"
+    fi
+}
+
 find_controller_python() {
-    if python_env_ok python3; then
+    # 1) 优先选已经具备 GPU/TensorRT 的解释器
+    if python_env_ok python3 && python_has_gpu_ep python3; then
         CTRL_PYTHON="python3"
         return 0
     fi
     local venv
     for venv in "$HOME/ros2_onnx/bin/python" "${SCRIPT_DIR}/onnx_venv/bin/python" "$HOME/sru_onnx_venv/bin/python"; do
-        if [ -x "$venv" ] && python_env_ok "$venv"; then
+        if [ -x "$venv" ] && python_env_ok "$venv" && python_has_gpu_ep "$venv"; then
             CTRL_PYTHON="$venv"
             return 0
         fi
     done
 
-    echo -e "${YELLOW}[i] 当前 Python 缺少 onnxruntime，尝试自动安装 (pip --user，免 sudo)...${NC}"
-    if python3 -m pip install --user onnxruntime >"$_setup_log" 2>&1 && python_env_ok python3; then
+    # 2) 尝试给系统 python3 装 onnxruntime-gpu
+    echo -e "${YELLOW}[i] 未检测到 CUDA/TensorRT 执行器，尝试安装 onnxruntime-gpu ...${NC}"
+    # 两个包安装到同一目录，先都卸掉避免 CPU 版覆盖 GPU 版
+    python3 -m pip uninstall -y onnxruntime onnxruntime-gpu >"$_setup_log" 2>&1 || true
+    # shellcheck disable=SC2046
+    if python3 -m pip install --user onnxruntime-gpu $(_onnx_index_args) >>"$_setup_log" 2>&1 \
+        && python_env_ok python3 && python_has_gpu_ep python3; then
         CTRL_PYTHON="python3"
-        echo -e "${GREEN}[✓] onnxruntime 已安装到用户目录 (~/.local)，系统 python3 可用。${NC}"
+        echo -e "${GREEN}[✓] onnxruntime-gpu 已安装到 ~/.local，系统 python3 可用。${NC}"
         return 0
     fi
 
+    # 3) 专用 venv
     local venv_dir="${SCRIPT_DIR}/onnx_venv"
-    echo -e "${YELLOW}[i] pip --user 不可用，改用专用 venv: ${venv_dir} (继承 ROS 系统 site-packages)...${NC}"
+    echo -e "${YELLOW}[i] 改用专用 venv: ${venv_dir} (继承 ROS 系统 site-packages)...${NC}"
+    # shellcheck disable=SC2046
     if python3 -m venv --system-site-packages "$venv_dir" >>"$_setup_log" 2>&1 \
         && "$venv_dir/bin/pip" install --upgrade pip setuptools wheel >>"$_setup_log" 2>&1 \
-        && "$venv_dir/bin/pip" install onnxruntime >>"$_setup_log" 2>&1 \
-        && python_env_ok "$venv_dir/bin/python"; then
+        && "$venv_dir/bin/pip" install onnxruntime-gpu $(_onnx_index_args) >>"$_setup_log" 2>&1 \
+        && python_env_ok "$venv_dir/bin/python" && python_has_gpu_ep "$venv_dir/bin/python"; then
         CTRL_PYTHON="${venv_dir/bin/python}"
         echo -e "${GREEN}[✓] 专用 venv 创建完成: ${venv_dir}${NC}"
         return 0
     fi
 
+    # 4) 最后才退回 CPU 版（保证能跑，但明确警告）
+    if python_env_ok python3; then
+        CTRL_PYTHON="python3"
+        echo -e "${YELLOW}[!] 只能使用 CPU 版 onnxruntime；GPU/TensorRT 未启用，控制回路 CPU 占用会更高。${NC}"
+        return 0
+    fi
+    if python3 -m pip install --user onnxruntime >>"$_setup_log" 2>&1 && python_env_ok python3; then
+        CTRL_PYTHON="python3"
+        echo -e "${YELLOW}[!] 已安装 CPU 版 onnxruntime；GPU/TensorRT 未启用。${NC}"
+        return 0
+    fi
+
     echo -e "${RED}[✗] onnxruntime 自动安装失败，详见日志: ${_setup_log}${NC}"
-    echo -e "${RED}    请手动执行: pip3 install --user onnxruntime   (或 sudo apt install python3-pip / python3-venv 后重试)${NC}"
+    echo -e "${RED}    请手动安装 Jetson 对应的 onnxruntime-gpu，例如:${NC}"
+    echo -e "${RED}    python3 -m pip install --user onnxruntime-gpu --extra-index-url ${ONNX_PIP_INDEX_URL:-<索引地址>}${NC}"
     return 1
 }
 
 if ! find_controller_python; then
     exit 1
 fi
-echo -e "${GREEN}[✓] 策略推理 Python: ${CTRL_PYTHON} (onnxruntime $(${CTRL_PYTHON} -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null || echo '?'))${NC}"
+echo -e "${GREEN}[✓] 策略推理 Python: ${CTRL_PYTHON} (onnxruntime $(${CTRL_PYTHON} -c 'import onnxruntime;print(onnxruntime.__version__)' 2>/dev/null || echo '?'), device: $(onnx_device "${CTRL_PYTHON}"))${NC}"
 
 # 记录所有后台进程 PID
 PIDS=()

@@ -58,12 +58,26 @@ echo "========================================="
 
 HAS_GPU=false
 
-if command -v nvidia-smi &> /dev/null; then
+# Jetson 上不一定有 nvidia-smi，用 tegra-release / tegrastats 兜底
+if [ -f /etc/nv_tegra_release ] || command -v tegrastats >/dev/null 2>&1; then
+    echo "Jetson detected (CUDA is available on the device)."
+    HAS_GPU=true
+elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     echo "NVIDIA GPU detected!"
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
     HAS_GPU=true
 else
     echo "No NVIDIA GPU detected. Will install CPU-only version of ONNX Runtime."
+fi
+
+# Jetson aarch64 通常需要 NVIDIA 的 wheel 索引；可用 ONNX_PIP_INDEX_URL 覆盖
+ONNX_PIP_INDEX_URL="${ONNX_PIP_INDEX_URL:-}"
+if [ -z "$ONNX_PIP_INDEX_URL" ] && [ "$(uname -m)" = "aarch64" ]; then
+    ONNX_PIP_INDEX_URL="https://pypi.jetson-ai-lab.dev/jp6/cu126"
+fi
+ONNX_INDEX_ARGS=""
+if [ -n "$ONNX_PIP_INDEX_URL" ]; then
+    ONNX_INDEX_ARGS="--extra-index-url $ONNX_PIP_INDEX_URL"
 fi
 
 # Install ONNX Runtime
@@ -74,21 +88,24 @@ echo "========================================="
 
 if [ "$HAS_GPU" = true ]; then
     echo "Installing ONNX Runtime with GPU support..."
-    pip install onnxruntime-gpu
+    # 两个包装到同一目录，先都卸掉避免 CPU 版覆盖 GPU 版
+    pip uninstall -y onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
+    # shellcheck disable=SC2086
+    pip install onnxruntime-gpu $ONNX_INDEX_ARGS
 
     # Verify GPU installation
     echo ""
     echo "Verifying ONNX Runtime GPU installation..."
-    python -c "import onnxruntime as ort; providers = ort.get_available_providers(); print(f'ONNX Runtime version: {ort.__version__}'); print(f'Available providers: {providers}'); print(f'GPU available: {\"CUDAExecutionProvider\" in providers}')"
+    python -c "import onnxruntime as ort; providers = ort.get_available_providers(); print(f'ONNX Runtime version: {ort.__version__}'); print(f'Available providers: {providers}')"
 
-    if python -c "import onnxruntime as ort; exit(0 if 'CUDAExecutionProvider' in ort.get_available_providers() else 1)"; then
+    if python -c "import onnxruntime as ort; p=ort.get_available_providers(); exit(0 if ('CUDAExecutionProvider' in p or 'TensorrtExecutionProvider' in p) else 1)"; then
         echo ""
         echo "SUCCESS: ONNX Runtime with GPU support installed successfully!"
     else
         echo ""
-        echo "WARNING: ONNX Runtime installed but GPU support not available."
-        echo "This could be due to driver issues or CUDA version mismatch."
-        echo "The CPU version will still work, but may be slower for some models."
+        echo "WARNING: ONNX Runtime installed but CUDA/TensorRT provider not available."
+        echo "Check that CUDA/cuDNN match the wheel (JetPack 6 / CUDA 12.6 -> jp6/cu126)."
+        echo "You can override the index with ONNX_PIP_INDEX_URL=..."
     fi
 else
     echo "Installing CPU-only version of ONNX Runtime..."

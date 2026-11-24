@@ -181,6 +181,12 @@ sequenceDiagram
   6. 处于 `stopped` 下收到新路径 → 仅更新内存路径，保持 `stopped` 且不自启；
   7. 收到 `"resume"` / `"continue"` 或在非 stopped 状态下收到新路径启动的瞬间 → 立即发布 `{"state":"running","msgs":[]}`。
 
+> **`stopped` 状态不变式（重要）**：`stopped` 是"暂停锁存"，按状态图它**只有一条出边**——显式恢复（手柄 A / `resume`）回到 `running`。
+> - `stopped` **永远不会**自动变成 `failed`；`set_state()` 会直接拒绝 `stopped -> failed` 的跃迁并打印 `[NavState] Refused illegal transition`。
+> - 底盘运动门（`/motion_enabled=False`，B 键）关闭期间，控制回路把停滞检测窗口持续重置，**不会**触发停滞超时（门关着本来就不该有位移）。
+> - 暂停期间收到新 `/global_path` 或 `/goal_3d` 只更新内存中的目标/路径，保持 `stopped`。
+> - 重复/回放的 `/motion_enabled=True`（两个 bridge 同一次 A 的重复消息）不会被当成恢复请求。
+
 ### 4.3 停滞遇阻判定机理（Blocked Detection）
 
 - **监控指标**：沿路径累计推进弧长增量 Δs；机器狗物理地面测速 v_real = √(v_x² + v_y²)。

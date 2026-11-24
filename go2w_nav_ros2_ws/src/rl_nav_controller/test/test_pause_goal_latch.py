@@ -64,6 +64,8 @@ class _Node:
         node.last_state_change_time = 0.0
         node.goal_reached_latched = False
         node.user_pause_latched = bool(paused)
+        node.chassis_motion_enabled = not paused
+        node.motion_enable_topic = '/motion_enabled'
         node.publish_status_message = lambda: None
 
         node.goal_frame_mode = 'auto'
@@ -199,3 +201,62 @@ def test_motion_enable_subscription_is_volatile():
     qos = motion_enable_subscription_qos()
     assert qos.durability == DurabilityPolicy.VOLATILE
     assert qos.reliability == ReliabilityPolicy.RELIABLE
+
+
+def test_duplicate_true_does_not_resume_a_pause():
+    """A duplicate /motion_enabled=True (same A press from two bridges, or a
+    replay) must not undo a pause that arrived in between."""
+    import time
+    from std_msgs.msg import Bool
+
+    h = _Node(paused=True)
+    h.send_path()
+    assert h.node.state == NavState.STOPPED
+
+    # The previous /motion_enabled message was a True just now, then B paused us:
+    # a duplicate of that True arrives while the pause is latched.
+    h.node.chassis_motion_enabled = True
+    h.node._last_motion_enable_true_time = time.monotonic()
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=True))
+    assert h.node.state == NavState.STOPPED, 'duplicate True must not resume a pause'
+
+    # A fresh A press (well separated in time) does resume.
+    h.node._last_motion_enable_true_time = time.monotonic() - 5.0
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=True))
+    assert h.node.state == NavState.RUNNING
+
+
+def test_stopped_can_never_transition_to_failed():
+    """The state diagram has no stopped -> failed edge; refuse it outright."""
+    h = _Node(paused=True)
+    h.node.set_state(NavState.FAILED, reason='Stalled: simulated watchdog')
+    assert h.node.state == NavState.STOPPED
+
+
+def test_stall_detector_is_inert_while_gate_closed():
+    """With the chassis gate closed, no-progress must not trip FAILED."""
+    h = _Node(paused=True)
+    h.node.state = NavState.RUNNING          # e.g. woke up without a real A edge
+    h.node.chassis_motion_enabled = False
+    detector = h.node.blocked_detector
+    detector.reset(current_time=1.0, progress_s=0.0)
+    # The control loop must reset instead of update() while the gate is closed.
+    # Simulate 10 s of standstill with the same guard the controller uses.
+    t = 1.0
+    for _ in range(100):
+        t += 0.1
+        if not h.node.chassis_motion_enabled:
+            detector.reset(t, 0.0)
+        elif detector.update(t, 0.0, (0.0, 0.0)):
+            h.node.set_state(NavState.FAILED, reason='Stalled: simulated')
+    assert h.node.state == NavState.RUNNING
+    # Control: with the gate open the same standstill does trip after 4 s.
+    h.node.chassis_motion_enabled = True
+    for _ in range(100):
+        t += 0.1
+        if not h.node.chassis_motion_enabled:
+            detector.reset(t, 0.0)
+        elif detector.update(t, 0.0, (0.0, 0.0)):
+            h.node.set_state(NavState.FAILED, reason='Stalled: simulated')
+            break
+    assert h.node.state == NavState.FAILED

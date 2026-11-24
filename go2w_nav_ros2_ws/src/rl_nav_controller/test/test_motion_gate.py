@@ -48,6 +48,8 @@ class _Node:
         node.get_logger = lambda: _Logger()
         node.state = NavState.RUNNING
         node.user_pause_latched = False
+        node.chassis_motion_enabled = True
+        node.motion_enable_topic = '/motion_enabled'
         node.is_abort_goal = False
         node.goal_reached_latched = False
         node.robot_odom_time = 1.0

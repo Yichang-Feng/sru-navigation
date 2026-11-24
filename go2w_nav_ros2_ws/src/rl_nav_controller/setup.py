@@ -19,7 +19,9 @@ setup(
         'numpy',
         'scipy',
         'opencv-python',
-        'onnxruntime',
+        # 注意：不要在这里固定 onnxruntime。
+        # Jetson 上需要的是 onnxruntime-gpu（见 setup_ros2_onnx.sh / start_local_sru.sh），
+        # 而在 install_requires 里写 onnxruntime 会拉入 CPU 版并覆盖 GPU 版。
     ],
     zip_safe=True,
     maintainer='Fan Yang',

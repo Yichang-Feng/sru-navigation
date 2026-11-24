@@ -523,6 +523,10 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             if is_stair_down or is_stair_up:
                 # In terrain mode on stairs, walking velocity is slow. Keep blocked detector from false abort.
                 self.blocked_detector.reset(self.robot_odom_time, progress_s)
+            elif not getattr(self, 'chassis_motion_enabled', True):
+                # Chassis gate closed (B / motion disabled): no progress is expected,
+                # so this is not a blockage. Never report FAILED from a pause.
+                self.blocked_detector.reset(self.robot_odom_time, progress_s)
             else:
                 robot_vel_xy = self.linear_vel[:2] if self.linear_vel else [0.0, 0.0]
                 if self.blocked_detector.update(self.robot_odom_time, progress_s, robot_vel_xy):

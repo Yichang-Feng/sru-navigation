@@ -309,6 +309,10 @@ if [ "$ENABLE_LOCAL_PLANNER" = true ]; then
 fi
 
 if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
+    if ! python3 -c "import onnxruntime as o,sys; p=o.get_available_providers(); sys.exit(0 if ('CUDAExecutionProvider' in p or 'TensorrtExecutionProvider' in p) else 1)" 2>/dev/null; then
+        echo -e "\033[33m[!] 当前 python3 没有 CUDA/TensorRT EP，rl_nav_controller 将使用 CPU 推理，CPU 占用会明显升高。\033[0m"
+        echo -e "\033[33m    修复: python3 -m pip uninstall -y onnxruntime onnxruntime-gpu && python3 -m pip install --user onnxruntime-gpu --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126\033[0m"
+    fi
     RL_ARGS="--ros-args \
         -p enable_stairs_mode:=${ENABLE_STAIRS} \
         -p enable_stair_remapping:=${ENABLE_STAIR_REMAPPING} \
