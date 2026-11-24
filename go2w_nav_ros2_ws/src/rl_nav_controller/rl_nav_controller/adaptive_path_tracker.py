@@ -224,7 +224,7 @@ class PathSegmentTracker:
         self.current_progress = max(self.current_progress, best_progress)
         return self.current_progress
 
-    def get_lookahead_point(self, lookahead_dist=2.0):
+    def get_lookahead_point(self, lookahead_dist=1.0):
         """Compute the dynamic lookahead carrot point along the path."""
         if not self.is_active():
             return None, None
@@ -322,7 +322,7 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
         self,
         logger=None,
         lookahead_min=0.5,
-        lookahead_max=2.0,
+        lookahead_max=1.0,
         window_dist=1.6,
         turn_angle_low_deg=20.0,
         turn_angle_high_deg=50.0,

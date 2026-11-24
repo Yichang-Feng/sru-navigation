@@ -53,7 +53,7 @@ def generate_launch_description():
     auto_unlock_bridge_arg = DeclareLaunchArgument('auto_unlock_bridge', default_value='true', description='Auto unlock chassis bridge')
     auto_unlock_bridge = LaunchConfiguration('auto_unlock_bridge')
 
-    lookahead_distance_arg = DeclareLaunchArgument('lookahead_distance', default_value='2.0', description='Lookahead distance in meters')
+    lookahead_distance_arg = DeclareLaunchArgument('lookahead_distance', default_value='1.0', description='Lookahead distance in meters')
     lookahead_distance = LaunchConfiguration('lookahead_distance')
 
     report_failure_arg = DeclareLaunchArgument('report_failure', default_value='true', description='Whether to report and transition to error/failed state')

@@ -182,11 +182,11 @@ class PathSegmentTracker:
         self.current_progress = max(self.current_progress, best_progress)
         return self.current_progress
 
-    def get_lookahead_point(self, lookahead_dist=2.0):
+    def get_lookahead_point(self, lookahead_dist=1.0):
         """Compute the dynamic lookahead carrot point along the path.
 
         Args:
-            lookahead_dist: Lookahead distance L in meters (default: 2.0m).
+            lookahead_dist: Lookahead distance L in meters (default: 1.0m).
 
         Returns:
             tuple: (carrot_pt_3d, carrot_yaw)

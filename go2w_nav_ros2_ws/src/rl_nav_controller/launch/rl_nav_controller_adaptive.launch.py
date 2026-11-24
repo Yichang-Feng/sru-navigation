@@ -78,7 +78,7 @@ def generate_launch_description():
     lookahead_min_arg = DeclareLaunchArgument('lookahead_min', default_value='0.5', description='Minimum lookahead distance (m)')
     lookahead_min = LaunchConfiguration('lookahead_min')
 
-    lookahead_max_arg = DeclareLaunchArgument('lookahead_max', default_value='2.0', description='Maximum lookahead distance (m)')
+    lookahead_max_arg = DeclareLaunchArgument('lookahead_max', default_value='1.0', description='Maximum lookahead distance (m)')
     lookahead_max = LaunchConfiguration('lookahead_max')
 
     window_dist_arg = DeclareLaunchArgument('adaptive_window_dist', default_value='1.5', description='Curvature lookahead window distance (m)')
