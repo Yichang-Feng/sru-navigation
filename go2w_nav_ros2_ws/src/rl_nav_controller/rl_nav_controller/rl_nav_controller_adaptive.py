@@ -28,10 +28,9 @@ from sensor_msgs.msg import Image, Joy
 from std_msgs.msg import Header, Bool, String
 from visualization_msgs.msg import Marker
 
+import cv2
 from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation as R
-
-import cv2
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -153,6 +152,19 @@ class LearningModel:
         self.has_heading = (self.policy_input_dim == 2578)
         self.state_dim = 18 if self.has_heading else 16
 
+        # Optional split-target graph (see scripts/patch_policy_split_target.py):
+        # `attn_prop` feeds ONLY the cross-attention query, while `obs` keeps feeding
+        # the SRU path. Two identical targets give bit-identical output to the
+        # original single-target graph.
+        self.has_attn_prop = 'attn_prop' in self.policy_input_names
+        if self.has_attn_prop:
+            attn_dim = self.policy_input_names['attn_prop'].shape[1]
+            if not isinstance(attn_dim, int) or attn_dim != self.state_dim:
+                raise RuntimeError(
+                    f'attn_prop dim {attn_dim} does not match state_dim {self.state_dim}; '
+                    're-export the split model for this observation layout'
+                )
+
         # Initialize LSTM hidden states
         self._h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
         self._c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
@@ -163,7 +175,7 @@ class LearningModel:
         # Warm up model with a fake run
         self.fake_run_once()
 
-        print('\033[92m' + f'Learning model is ready (ONNX Runtime, state_dim={self.state_dim}, has_heading={self.has_heading}).' + '\033[0m')
+        print('\033[92m' + f'Learning model is ready (ONNX Runtime, state_dim={self.state_dim}, has_heading={self.has_heading}, attn_prop={self.has_attn_prop}).' + '\033[0m')
 
     def _resize_bilinear(self, img: np.ndarray, target_size: tuple) -> np.ndarray:
         """Resize image using bilinear interpolation.
@@ -243,7 +255,8 @@ class LearningModel:
         robot_orientation_w,
         depth_image,
         target_yaw_w=None,
-        is_reset=False
+        is_reset=False,
+        target_pos_w_sru=None
     ):
         """Run policy inference to get velocity command.
 
@@ -252,12 +265,15 @@ class LearningModel:
             angular_vel: Angular velocity in base frame [wx, wy, wz]
             gravity_vector: Gravity vector in base frame [gx, gy, gz]
             last_action: Previous action [vx, vy, wz]
-            target_pos_w: Target position in world frame
+            target_pos_w: Target position in world frame (feeds the cross-attention query)
             robot_pos_w: Robot position in world frame
             robot_orientation_w: Robot orientation quaternion [w, x, y, z]
             depth_image: Depth image array
             target_yaw_w: Target yaw heading in world frame (radians)
             is_reset: Whether to reset hidden state
+            target_pos_w_sru: Optional second target in world frame that feeds ONLY the
+                SRU/MLP path. Requires a split-target graph (attn_prop input). When
+                None, both branches see target_pos_w (original behaviour).
 
         Returns:
             Tuple of (velocity command, raw action, target vector in base frame)
@@ -274,11 +290,16 @@ class LearningModel:
             target_pos_w, robot_pos_w, robot_orientation_w
         )
 
-        state_list = (
-            list(linear_vel) + list(angular_vel) + list(gravity_vector) +
-            list(last_action) + target_pos_log.tolist()
-        )
+        if target_pos_w_sru is not None and self.has_attn_prop:
+            sru_target_log, _ = self.normalize_target_position(
+                target_pos_w_sru, robot_pos_w, robot_orientation_w
+            )
+        else:
+            # Single-target graph, or no split requested: both branches see target_pos_w.
+            sru_target_log = target_pos_log
+            target_pos_w_sru = None
 
+        target_heading = None
         if self.has_heading:
             if target_yaw_w is not None and robot_orientation_w is not None:
                 qw, qx, qy, qz = robot_orientation_w
@@ -287,22 +308,38 @@ class LearningModel:
                 target_heading = [float(np.cos(yaw_err)), float(np.sin(yaw_err))]
             else:
                 target_heading = [1.0, 0.0]
-            state_list.extend(target_heading)
+
+        def _assemble_state(target_log):
+            state_list = (
+                list(linear_vel) + list(angular_vel) + list(gravity_vector) +
+                list(last_action) + target_log.tolist()
+            )
+            if target_heading is not None:
+                state_list.extend(target_heading)
+            return np.array(state_list, dtype=np.float32)
 
         # Assemble state input tensor: 16 or 18 elements
-        state_input = np.array(state_list, dtype=np.float32)
+        state_input = _assemble_state(sru_target_log)
 
         # Combine state and depth embedding: [16/18] + [2560] = [2576/2578]
         obs = np.concatenate([state_input, depth_embedding])[np.newaxis].astype(np.float32)
 
+        policy_feed = {
+            'obs': obs,
+            'h_in': self._h_state,
+            'c_in': self._c_state
+        }
+        if self.has_attn_prop:
+            attn_state = (
+                _assemble_state(target_pos_log)
+                if target_pos_w_sru is not None else state_input
+            )
+            policy_feed['attn_prop'] = attn_state[np.newaxis]
+
         # Run policy inference with LSTM states
         outputs = self.policy_session.run(
             None,
-            {
-                'obs': obs,
-                'h_in': self._h_state,
-                'c_in': self._c_state
-            }
+            policy_feed
         )
 
         raw_action, h_out, c_out = outputs
