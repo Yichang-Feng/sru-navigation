@@ -2345,7 +2345,12 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--sim', action='store_true', help='run in simulation mode')
     parser.add_argument('--policy-path', type=str, default=None, help='Path to custom nav_policy.onnx')
-    parser.add_argument('--arrive-threshold', type=float, default=0.45, help='Goal arrival distance threshold in meters (default: 0.45)')
+    # Legacy alias. Must default to None: a non-None default silently overrides
+    # the ROS parameter ``segment_arrive_threshold`` (see the elif below), which
+    # is how ``-p segment_arrive_threshold:=X`` used to be ignored.
+    parser.add_argument('--arrive-threshold', type=float, default=None,
+                        help='Legacy alias of --segment-arrive-threshold '
+                             '(absent: the ROS segment_arrive_threshold parameter wins)')
     parser.add_argument('--path-topic', type=str, default=None, help='Global path topic name (default: /global_path)')
     parser.add_argument('--stop-topic', type=str, default=None, help='Mission control topic name (default: /mission/control)')
     parser.add_argument('--control-topic', type=str, default=None, help='Mission control topic alias (default: /mission/control)')
@@ -2378,7 +2383,11 @@ def main(args=None):
         min_depth=0.25,
         max_depth=10.0,
         control_frequency=5.0,
-        arrive_threshold=known_args.arrive_threshold,
+        # Single-goal arrival radius. ``--arrive-threshold`` is an alias of the
+        # segment threshold, so absence of the flag keeps the historical 0.45 m
+        # here instead of leaking None into arrive_goal_threshold.
+        arrive_threshold=(known_args.arrive_threshold
+                          if known_args.arrive_threshold is not None else 0.45),
         use_sim=use_sim
     )
 

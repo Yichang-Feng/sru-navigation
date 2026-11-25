@@ -45,7 +45,7 @@ REPORT_FAILURE="false"
 ENABLE_RVIZ=true
 
 # 到达判定与楼梯感知特定参数
-SEGMENT_ARRIVE_THRESHOLD="0.20"
+SEGMENT_ARRIVE_THRESHOLD="0.45"
 ENABLE_STAIRS="true"
 ENABLE_STAIR_REMAPPING="false"  # 默认关闭深度重映射，仅保留楼梯前瞻点 0.4m 切换测试
 STAIR_LOOKAHEAD="0.4"
@@ -75,7 +75,7 @@ show_help() {
     echo "  --mode <模式>        显式指定自适应模式: both | curvature_only | clearance_only | none"
     echo "  --min <距离>        平地自适应前瞻下界 (默认 0.5m)"
     echo "  --max <距离>        平地自适应前瞻上界 (默认 2.0m)"
-    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.20m)"
+    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.45m)"
     echo "  --heading-align     开启终端航向对齐 (默认开启)"
     echo "  --no-heading-align  禁用终端航向对齐 (到达坐标即完成)"
     echo "  --heading-tol <弧度> 终端航向对齐容差 (默认 0.26 rad ≈ 15°)"

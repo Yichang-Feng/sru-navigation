@@ -75,7 +75,7 @@ WAYPOINTS_MARKER_ID = 3
 GRAVITY = 9.81
 
 # Terminal Goal Arrival & Heading Alignment Defaults
-SEGMENT_ARRIVE_THRESHOLD = 0.20  # meters (realistic arrival radius for quadruped)
+SEGMENT_ARRIVE_THRESHOLD = 0.45  # meters (segment arrival radius; ROS param wins over --arrive-threshold)
 DEFAULT_ENABLE_TERMINAL_HEADING_ALIGN = True
 DEFAULT_TERMINAL_HEADING_TOL = 0.26  # ~15 degrees in radians
 DEFAULT_TERMINAL_HEADING_KP = 1.2

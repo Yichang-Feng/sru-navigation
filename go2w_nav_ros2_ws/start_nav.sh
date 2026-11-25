@@ -50,7 +50,7 @@ REPORT_FAILURE="true"           # 默认启用停滞报错上报 (标准状态�
 ENABLE_RVIZ=false               # 默认不自动弹出 RViz (按要求关闭)
 
 # 到达判定与楼梯感知特定参数
-SEGMENT_ARRIVE_THRESHOLD="0.20"
+SEGMENT_ARRIVE_THRESHOLD="0.45"
 ENABLE_STAIRS="true"
 ENABLE_STAIR_REMAPPING="false"  # 默认关闭深度重映射，仅保留楼梯前瞻点 0.4m 切换测试
 STAIR_LOOKAHEAD="0.4"
@@ -94,7 +94,7 @@ show_help() {
     echo "  --align-enter <距离>  到点转身进入距离 (默认 0.20m, 需 --arrive-thresh <= 此值)"
     echo "  --align-abort <距离>  到点转身放弃距离 (默认 0.40m, 已扣除原地旋转漂移)"
     echo "  --align-lever <距离>  里程计杠杆臂 (默认 0.55m, 原地旋转位置漂移补偿)"
-    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.20m)"
+    echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.45m)"
     echo "  --heading-align     开启终端航向对齐 (默认开启)"
     echo "  --no-heading-align  禁用终端航向对齐 (到达坐标即完成)"
     echo "  --heading-tol <弧度> 终端航向对齐容差 (默认 0.26 rad ≈ 15°)"

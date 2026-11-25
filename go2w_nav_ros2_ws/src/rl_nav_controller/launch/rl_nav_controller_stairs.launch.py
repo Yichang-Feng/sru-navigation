@@ -26,13 +26,15 @@
         lookahead_max:=1.2 report_failure:=false
 
 注意：
-- 默认 depth_topic 为 /camera/depth/image_rect_raw，对应
-  `ros2 run realsense2_camera realsense2_camera` 或
-  `ros2 launch realsense2_camera rs_launch.py depth_enable:=true`
-  起的相机。
-- 如果相机通过 `ros2 launch realsense2_camera rs_launch.py` 并显式设置
-  camera_namespace:=camera camera_name:=camera 启动，话题是
-  /camera/camera/depth/image_rect_raw，需要显式覆盖 depth_topic。
+- 本文件的默认值 = 实机上调通的参数，直接
+  `ros2 launch rl_nav_controller rl_nav_controller_stairs.launch.py`
+  即可，不需要再传任何参数。
+- 默认 depth_topic 为 /camera/depth/image_rect_raw（本机相机不带 namespace）。
+  若相机改用 `camera_namespace:=camera camera_name:=camera` 启动，话题会变成
+  /camera/camera/depth/image_rect_raw，启动时覆盖：
+  depth_topic:=/camera/camera/depth/image_rect_raw
+- 节点完全由深度回调驱动：话题不对就一行 cmd_vel 都不会发，
+  2 秒后安全看门狗报 "Camera depth frames lost" 并转 ERROR。
 """
 
 from launch import LaunchDescription
@@ -77,7 +79,10 @@ def generate_launch_description():
         arg('blocked_timeout', '4.0', '停滞判定超时 (s)'),
         arg('report_failure', 'true', '停滞时是否上报 failed'),
 
-        # 深度相机
+        # 深度相机（本机实机话题，相机未设 namespace）
+        # 若相机以 camera_namespace:=camera 启动，话题是
+        # /camera/camera/depth/image_rect_raw，启动时覆盖：
+        #   depth_topic:=/camera/camera/depth/image_rect_raw
         arg('depth_topic', '/camera/depth/image_rect_raw', '深度图话题'),
         arg('min_depth', '0.15', '最小有效深度 (m)'),
         arg('max_depth', '10.0', '最大有效深度 (m)'),
@@ -96,7 +101,7 @@ def generate_launch_description():
         arg('slew_rate_increase', '0.8', '前瞻恢复速率 (m/s)'),
         arg('slew_rate_decrease', '2.5', '前瞻收缩速率 (m/s)'),
         arg('door_speed_boost', '0.0', '门区保底速度 (m/s)'),
-        arg('segment_arrive_threshold', '0.20', '路径段到达阈值 (m)'),
+        arg('segment_arrive_threshold', '0.45', '路径段到达阈值 (m)'),
 
         # 楼梯感知
         arg('enable_stairs_mode', 'true', '启用楼梯坡度门控'),
@@ -179,12 +184,9 @@ def generate_launch_description():
         name='navigation_policy_node',
         output='screen',
         parameters=[parameters],
-        # main() 里 --arrive-threshold 的 argparse 默认值是 0.45，会覆盖
-        # segment_arrive_threshold 的 ROS 参数；显式传 CLI 参数保证 0.20 生效。
-        arguments=[
-            '--segment-arrive-threshold',
-            LaunchConfiguration('segment_arrive_threshold'),
-        ],
+        # 不要再传 --segment-arrive-threshold：那个 argparse 参数以前是用来绕开
+        # 「--arrive-threshold 默认 0.45 覆盖 ROS 参数」的 bug；该 bug 已修好，
+        # ROS 参数 segment_arrive_threshold 现在是唯一来源。
     )
 
     return LaunchDescription(declared_args + [stairs_node])
