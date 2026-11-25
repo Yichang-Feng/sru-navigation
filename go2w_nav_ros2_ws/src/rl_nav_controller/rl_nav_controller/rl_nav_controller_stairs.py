@@ -75,27 +75,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.stair_up_lookahead_dist = float(self.get_parameter('stair_up_lookahead_dist').value)
         self.stair_min_forward_vel = float(self.get_parameter('stair_min_forward_vel').value)
 
-        # Flat-ground split target: cross-attention sees a short lookahead ("is this
-        # passable?"), the SRU/MLP path sees a long one ("how fast?"). Requires the
-        # split-target ONNX (nav_policy_split.onnx). Corners (adaptive lookahead
-        # already shortened) and stairs keep a single target.
-        self.declare_parameter('split_target', False)
-        self.declare_parameter('split_attn_lookahead', 0.4)
-        self.declare_parameter('split_sru_lookahead', 2.0)
-        self.declare_parameter('split_min_lookahead', 0.8)
-        # ray: attention point = split_attn_lookahead metres from the robot along the
-        #      long carrot's bearing (default, avoids the bearing blow-up that makes
-        #      the robot spin in place);  path: the path point at that arc length.
-        self.declare_parameter('split_attn_mode', 'ray')
-        self.split_target = bool(self.get_parameter('split_target').value)
-        self.split_attn_lookahead = float(self.get_parameter('split_attn_lookahead').value)
-        self.split_sru_lookahead = float(self.get_parameter('split_sru_lookahead').value)
-        self.split_min_lookahead = float(self.get_parameter('split_min_lookahead').value)
-        self.split_attn_mode = str(self.get_parameter('split_attn_mode').value).strip().lower()
-        if self.split_attn_mode not in ('ray', 'path'):
-            self.get_logger().warn(f'Unknown split_attn_mode {self.split_attn_mode!r}, using ray')
-            self.split_attn_mode = 'ray'
-
         # Ensure segment_arrive_threshold is realistically tuned for quadruped stair/terrain navigation (default 0.20m)
         if hasattr(self, 'arrive_goal_threshold') and self.arrive_goal_threshold is not None:
             if getattr(self, 'segment_arrive_threshold', 0.20) < 0.15:
@@ -204,77 +183,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             f'side_clamp={self.depth_remapper.side_min_clamp:.2f}m' +
             '\033[0m'
         )
-        if self.split_target:
-            self.get_logger().info(
-                '\033[96m' +
-                f'[SplitTarget] ENABLED: flat/straight ground -> attention L={self.split_attn_lookahead:.2f}m, '
-                f'SRU L={self.split_sru_lookahead:.2f}m (split only while adaptive L>={self.split_min_lookahead:.2f}m); '
-                'corners and stairs keep a single target.' +
-                '\033[0m'
-            )
-        self.target_pos_w_sru = None
-
-    def _short_attn_point(self, far_pt, robot_pos):
-        """A point `split_attn_lookahead` from the robot on the ray towards far_pt.
-
-        Taking the *path point* at 0.6 m instead makes the bearing explode as soon
-        as the robot is a little off the path: 0.6 m ahead and 0.5 m to the side is
-        already 40 deg, and a path that bends near the robot can put the point
-        beside or behind it. The policy answers a target beyond ~90 deg with
-        backward + turn, i.e. it spins on the spot and never advances, so progress
-        never updates and it stays stuck. Keeping the long carrot's bearing and
-        shortening only the distance keeps the "is it open ahead?" signal without
-        that failure mode.
-        """
-        if far_pt is None or robot_pos is None:
-            return None
-        dx = float(far_pt[0]) - float(robot_pos[0])
-        dy = float(far_pt[1]) - float(robot_pos[1])
-        dz = 0.0
-        if len(far_pt) > 2 and len(robot_pos) > 2:
-            dz = float(far_pt[2]) - float(robot_pos[2])
-        r = math.hypot(dx, dy)
-        if r < 1e-3:
-            return None
-        k = self.split_attn_lookahead / r
-        return [
-            float(robot_pos[0]) + dx * k,
-            float(robot_pos[1]) + dy * k,
-            float(robot_pos[2]) + dz * k,
-        ]
-
-    def _apply_split_target(self, carrot_pt, lookahead, robot_pos=None):
-        """Pick the target(s) for this control step.
-
-        Returns the target that goes to the cross-attention query (also stored in
-        self.target_pos_w) and stores the SRU target in self.target_pos_w_sru.
-
-        Split only on flat, straight ground: when the adaptive lookahead has already
-        been shortened for a corner (lookahead < split_min_lookahead) both branches
-        keep the same carrot, exactly as before this feature existed.
-        """
-        self.target_pos_w_sru = carrot_pt
-        if not self.split_target or lookahead < self.split_min_lookahead:
-            return carrot_pt
-
-        sru_pt, _ = self.path_tracker.get_lookahead_point(lookahead_dist=self.split_sru_lookahead)
-        if sru_pt is None:
-            return carrot_pt
-
-        if self.split_attn_mode == 'path':
-            attn_pt, _ = self.path_tracker.get_lookahead_point(lookahead_dist=self.split_attn_lookahead)
-        else:
-            attn_pt = self._short_attn_point(sru_pt, robot_pos)
-        if attn_pt is None:
-            return carrot_pt
-
-        self.target_pos_w_sru = sru_pt
-        self.get_logger().info(
-            f'[SplitTarget] attn_L={self.split_attn_lookahead:.2f}m sru_L={self.split_sru_lookahead:.2f}m '
-            f'(adaptive_L={lookahead:.2f}m, mode={self.split_attn_mode})',
-            throttle_duration_sec=2.0
-        )
-        return attn_pt
 
     def global_path_callback(self, path_msg: Path):
         """Reset stair slope gate on new path arrival and delegate to parent."""
@@ -302,7 +210,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.heading_align_entry_yaw = None
         self.path_tracker.clear()
         self.target_pos_w = None
-        self.target_pos_w_sru = None
         self.target_yaw_w = None
         self.last_action = self._reset_last_action()
         if hasattr(self, 'slope_gate'):
@@ -451,7 +358,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             self._stop_robot()
             self.is_aligning_heading = False
             self.target_pos_w = None
-            self.target_pos_w_sru = None
             self.target_yaw_w = None
             self.path_tracker.clear()
             self.is_abort_goal = False
@@ -591,7 +497,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         self.heading_align_entry_yaw = robot_yaw
                         self.path_tracker.clear()
                         self.target_pos_w = None
-                        self.target_pos_w_sru = None
                         self.target_yaw_w = None
                         self.last_action = self._reset_last_action()
                         self.slope_gate.reset()
@@ -689,7 +594,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                         carrot_yaw = guide_yaw
 
                 self.target_pos_w = carrot_pt
-                self.target_pos_w_sru = carrot_pt  # stairs: both branches see the stair carrot
                 self.target_yaw_w = carrot_yaw
                 z_drop = carrot_pt[2] - pos_for_tracking[2]
                 self.get_logger().info(
@@ -702,7 +606,6 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                 self.path_tracker.is_in_narrow_passage = False
                 carrot_pt, carrot_yaw = self.path_tracker.get_lookahead_point(lookahead_dist=self.stair_up_lookahead_dist)
                 self.target_pos_w = carrot_pt
-                self.target_pos_w_sru = carrot_pt  # stairs: both branches see the stair carrot
                 self.target_yaw_w = carrot_yaw
                 z_rise = carrot_pt[2] - pos_for_tracking[2] if carrot_pt is not None and pos_for_tracking is not None else 0.0
                 self.get_logger().info(
@@ -715,11 +618,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                     current_time=self.robot_odom_time,
                     depth_image=self.depth_image
                 )
-                self.target_pos_w = self._apply_split_target(
-                    carrot_pt,
-                    debug_info.get("lookahead", 0.0),
-                    pos_for_tracking if pos_for_tracking is not None else self.robot_pos_w,
-                )
+                self.target_pos_w = carrot_pt
                 self.target_yaw_w = carrot_yaw
                 self._publish_adaptive_debug(debug_info)
                 self.get_logger().info(
@@ -742,21 +641,18 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             )
 
         elif self.target_pos_w is None:
-            self.target_pos_w_sru = None
             self._stop_robot()
             if self.state in (NavState.RUNNING, NavState.GOAL_REACHED):
                 self.set_state(NavState.IDLE, reason="No active target or path")
             return
         else:
-            # Single goal tracking mode: no path, so both branches use the same goal
-            self.target_pos_w_sru = self.target_pos_w
+            # Single goal tracking mode
             is_arrived = self._check_goal_reached(
                 self.target_pos_w, self.robot_pos_w, self.target_yaw_w, self.robot_orientation_w
             )
             if is_arrived:
                 self._stop_robot()
                 self.target_pos_w = None
-                self.target_pos_w_sru = None
                 self.target_yaw_w = None
                 self.last_action = self._reset_last_action()
                 self.set_state(NavState.GOAL_REACHED, reason="Single goal reached")
@@ -806,8 +702,7 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             curr_robot_ori,
             depth_for_policy,
             target_yaw_w=self.target_yaw_w,
-            is_reset=self.is_reset_hidden_state,
-            target_pos_w_sru=self.target_pos_w_sru
+            is_reset=self.is_reset_hidden_state
         )
 
         if self.is_reset_hidden_state:
@@ -909,21 +804,6 @@ def main(args=None):
     parser.add_argument('--stair-min-drop', type=float, default=None, help='Minimum elevation drop for stair descent (default: 0.15m)')
     parser.add_argument('--stair-up-min-gain', type=float, default=None, help='Minimum elevation gain for stair ascent (default: 0.15m)')
 
-    # Flat-ground split target (needs nav_policy_split.onnx)
-    parser.add_argument('--split-target', dest='split_target', action='store_true', default=None,
-                        help='Flat ground: cross-attention gets split_attn_lookahead, SRU gets split_sru_lookahead')
-    parser.add_argument('--no-split-target', dest='split_target', action='store_false',
-                        help='Disable split target (original single-target behaviour)')
-    parser.add_argument('--split-attn-lookahead', type=float, default=None,
-                        help='Cross-attention lookahead on flat ground (default: 0.40m)')
-    parser.add_argument('--split-sru-lookahead', type=float, default=None,
-                        help='SRU lookahead on flat ground (default: 2.0m)')
-    parser.add_argument('--split-min-lookahead', type=float, default=None,
-                        help='Only split when the adaptive lookahead is >= this (corner guard, default: 0.8m)')
-    parser.add_argument('--split-attn-mode', choices=['ray', 'path'], default=None,
-                        help='Attention target: ray = short distance along the long carrot bearing (default), '
-                             'path = path point at that arc length')
-
     # Terminal heading alignment CLI arguments
     parser.add_argument('--heading-align', dest='enable_terminal_heading_align', action='store_true', default=None, help='Enable terminal goal heading alignment')
     parser.add_argument('--no-heading-align', dest='enable_terminal_heading_align', action='store_false', help='Disable terminal goal heading alignment')
@@ -956,39 +836,7 @@ def main(args=None):
     if known_args.policy_path:
         policy_model_path = os.path.expanduser(known_args.policy_path)
     else:
-        # Pick the graph that matches split_target: the split graph whenever splitting
-        # is requested, otherwise the original nav_policy.onnx. The split value can
-        # arrive as a CLI flag, as `-p split_target:=...`, or inside a --params-file
-        # (that is what `ros2 launch` passes), so all three are checked.
-        def _resolve_bool_arg(argv, name, cli_value):
-            if cli_value is not None:
-                return cli_value
-            for item in argv:
-                if item.startswith(name + ':='):
-                    return item.split(':=', 1)[1].strip().lower() in ('1', 'true', 'yes', 'on')
-            for i, item in enumerate(argv):
-                if item == '--params-file' and i + 1 < len(argv):
-                    try:
-                        import yaml
-                        with open(argv[i + 1]) as f:
-                            data = yaml.safe_load(f) or {}
-                    except Exception:
-                        continue
-                    for node_cfg in data.values():
-                        params = node_cfg.get('ros__parameters', {}) if isinstance(node_cfg, dict) else {}
-                        if isinstance(params, dict) and name in params:
-                            value = params[name]
-                            if isinstance(value, bool):
-                                return value
-                            return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
-            return None
-
-        split_requested = _resolve_bool_arg(ros_args, 'split_target', known_args.split_target)
-        split_policy_path = os.path.join(pkg_path, 'deployment_policies', 'nav_policy_split.onnx')
-        if split_requested and os.path.isfile(split_policy_path):
-            policy_model_path = split_policy_path
-        else:
-            policy_model_path = os.path.join(pkg_path, 'deployment_policies', 'nav_policy.onnx')
+        policy_model_path = os.path.join(pkg_path, 'deployment_policies', 'nav_policy.onnx')
 
     node = StairsNavigationPolicyNode(
         preprocess_model_path=preprocess_model_path,
@@ -1074,34 +922,6 @@ def main(args=None):
     if known_args.stair_up_min_gain is not None:
         node.slope_gate.min_elevation_gain = known_args.stair_up_min_gain
 
-    # Configure flat-ground split target
-    if known_args.split_target is not None:
-        node.split_target = known_args.split_target
-    if known_args.split_attn_lookahead is not None:
-        node.split_attn_lookahead = known_args.split_attn_lookahead
-    if known_args.split_sru_lookahead is not None:
-        node.split_sru_lookahead = known_args.split_sru_lookahead
-    if known_args.split_min_lookahead is not None:
-        node.split_min_lookahead = known_args.split_min_lookahead
-    if known_args.split_attn_mode is not None:
-        node.split_attn_mode = known_args.split_attn_mode
-    if node.split_target and not getattr(node.model, 'has_attn_prop', False):
-        node.get_logger().error(
-            'split_target is enabled, but the loaded policy has no attn_prop input: '
-            f'{policy_model_path}. Copy deployment_policies/nav_policy_split.onnx '
-            '(generate with scripts/patch_policy_split_target.py) or start with '
-            '--no-split-target / -p split_target:=false.'
-        )
-        node.destroy_node()
-        raise SystemExit(2)
-
-    if getattr(node.model, 'has_attn_prop', False) and not node.split_target:
-        # Only reachable when --policy-path points at the split graph explicitly.
-        node.get_logger().warn(
-            '\033[93m[SplitTarget] Loaded a split-target graph (attn_prop) but split_target=false: '
-            'both branches get the same carrot, so the output equals nav_policy.onnx.\033[0m'
-        )
-
     # Configure terminal heading alignment arguments
     if known_args.enable_terminal_heading_align is not None:
         node.enable_terminal_heading_align = known_args.enable_terminal_heading_align
@@ -1125,12 +945,6 @@ def main(args=None):
         f'min_drop={node.slope_gate.min_elevation_drop:.2f}m, '
         f'min_gain={node.slope_gate.min_elevation_gain:.2f}m, '
         f'side_clamp={node.depth_remapper.side_min_clamp:.2f}m)'
-    )
-    node.get_logger().info(
-        f'Policy: {policy_model_path} | split_target={node.split_target} '
-        f'(attn_L={node.split_attn_lookahead:.2f}m, sru_L={node.split_sru_lookahead:.2f}m, '
-        f'mode={node.split_attn_mode}, '
-        f'split_only_if_adaptive_L>={node.split_min_lookahead:.2f}m; stairs/corners keep one target)'
     )
 
     try:

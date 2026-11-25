@@ -109,12 +109,6 @@ def generate_launch_description():
         arg('stair_side_min_clamp', '0.50', '扶手侧边钳位 (m)'),
         arg('stair_min_elevation_drop', '0.15', '下楼最小落差 (m)'),
 
-        # 平地双目标（需要 nav_policy_split.onnx）
-        arg('split_target', 'false', '平地双目标: cross-attention 短前瞻 / SRU 长前瞻'),
-        arg('split_attn_lookahead', '0.4', '平地 cross-attention 前瞻 (m)'),
-        arg('split_sru_lookahead', '2.0', '平地 SRU 前瞻 (m)'),
-        arg('split_min_lookahead', '0.8', '自适应前瞻 >= 该值才拆分 (m)'),
-        arg('split_attn_mode', 'ray', '注意力目标: ray=沿长 carrot 方位取短距离(默认) | path=路径上的点'),
 
         # 终点航向对齐
         arg('enable_terminal_heading_align', 'true', '启用终点航向对齐'),
@@ -171,11 +165,6 @@ def generate_launch_description():
         'stair_side_min_clamp': _float('stair_side_min_clamp'),
         'stair_min_elevation_drop': _float('stair_min_elevation_drop'),
 
-        'split_target': _bool('split_target'),
-        'split_attn_lookahead': _float('split_attn_lookahead'),
-        'split_sru_lookahead': _float('split_sru_lookahead'),
-        'split_min_lookahead': _float('split_min_lookahead'),
-        'split_attn_mode': LaunchConfiguration('split_attn_mode'),
 
         'enable_terminal_heading_align': _bool('enable_terminal_heading_align'),
         'terminal_heading_tol': _float('terminal_heading_tol'),

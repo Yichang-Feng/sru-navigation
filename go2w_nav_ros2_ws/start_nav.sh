@@ -7,9 +7,6 @@
 #   1. 导航策略：RL 楼梯感知与双因子自适应控制器 (rl_nav_controller_stairs)
 #   2. 平地前瞻：--curv-only + --min 0.4 + --switch-mode corner_dist
 #      (按"到下一个拐角的距离"收缩前瞻；避免走廊双侧墙壁被深度误判为窄门)
-#      平地双目标 (split_target)：cross-attention 用 0.4m 短前瞻（决定敢不敢走），
-#      SRU 用 2.0m 长前瞻（决定速度）；拐角（自适应前瞻 <0.8m）与楼梯仍为单一目标。
-#      需要 deployment_policies/nav_policy_split.onnx；--no-split-target 可整体回退。
 #   3. 楼梯感知模式：3D 路径坡度门控，下楼前瞻锁存 0.40m，原始深度图直接下楼 (无虚假阻挡)
 #   4. 容错与状态机：规范 6 状态流转，保留停滞超时报错 (REPORT_FAILURE="true")
 #   5. RViz 可视化：默认不自动弹出 (ENABLE_RVIZ=false)，支持通过 --rviz 参数开启
@@ -64,14 +61,6 @@ STAIR_UP_SLOPE_THRESH="0.20"
 STAIR_SIDE_CLAMP="0.50"
 STAIR_MIN_DROP="0.15"
 
-# 平地双目标 (需要 nav_policy_split.onnx)
-#   cross-attention 看短前瞻 (决定"敢不敢走")，SRU 看长前瞻 (决定"多快")；
-#   拐角（自适应前瞻已收缩）与楼梯保持单一目标，行为不变。
-SPLIT_TARGET="true"
-SPLIT_ATTN_L="0.4"
-SPLIT_SRU_L="2.0"
-SPLIT_MIN_L="0.8"
-
 # 终点航向对齐参数
 ENABLE_HEADING_ALIGN="true"     # 默认开启终点姿态对齐
 HEADING_TOL="0.26"              # 默认约 15 度容差 (弧度)
@@ -119,11 +108,6 @@ show_help() {
     echo "  --stair-side-clamp <距离> 扶手侧边栏杆距离钳位 (默认 0.50m)"
     echo "  --stair-min-drop <高度>   触发下楼最小落差阈值 (默认 0.15m, 单阶落差)"
     echo "  --no-stairs         禁用楼梯深度图重映射与坡度门控"
-    echo "  --split-target      平地开启双目标 (默认开启: attn 0.4m / SRU 2.0m)"
-    echo "  --no-split-target   关闭双目标，恢复单一目标"
-    echo "  --split-attn <距离> 平地 cross-attention 前瞻 (默认 0.4m)"
-    echo "  --split-sru <距离>  平地 SRU 前瞻 (默认 2.0m)"
-    echo "  --split-min <距离>  自适应前瞻 >= 该值才拆分，拐角保护 (默认 0.8m)"
     echo "  --boost <速度>      平地过门保底速度 (默认 0.35m/s, 楼梯上严格禁用)"
     echo "  --no-rviz           后台运行，不自动弹出 RViz 窗口"
     echo "  --report-failure    开启严格报错模式 (停滞报错)"
@@ -224,26 +208,6 @@ while [[ $# -gt 0 ]]; do
         --no-stairs)
             ENABLE_STAIRS="false"
             shift
-            ;;
-        --split-target)
-            SPLIT_TARGET="true"
-            shift
-            ;;
-        --no-split-target)
-            SPLIT_TARGET="false"
-            shift
-            ;;
-        --split-attn)
-            SPLIT_ATTN_L="$2"
-            shift 2
-            ;;
-        --split-sru)
-            SPLIT_SRU_L="$2"
-            shift 2
-            ;;
-        --split-min)
-            SPLIT_MIN_L="$2"
-            shift 2
             ;;
         --boost)
             DOOR_SPEED_BOOST="$2"
@@ -449,10 +413,6 @@ if [ "$ENABLE_RL_STAIRS_PLANNER" = true ]; then
         -p stair_up_slope_threshold:=${STAIR_UP_SLOPE_THRESH} \
         -p stair_side_min_clamp:=${STAIR_SIDE_CLAMP} \
         -p stair_min_elevation_drop:=${STAIR_MIN_DROP} \
-        -p split_target:=${SPLIT_TARGET} \
-        -p split_attn_lookahead:=${SPLIT_ATTN_L} \
-        -p split_sru_lookahead:=${SPLIT_SRU_L} \
-        -p split_min_lookahead:=${SPLIT_MIN_L} \
         -p enable_adaptive_lookahead:=${ENABLE_ADAPTIVE} \
         -p adaptive_mode:=${ADAPTIVE_MODE} \
         -p lookahead_min:=${LOOKAHEAD_MIN} \
