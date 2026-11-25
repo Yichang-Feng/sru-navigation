@@ -114,6 +114,7 @@ def generate_launch_description():
         arg('split_attn_lookahead', '0.4', '平地 cross-attention 前瞻 (m)'),
         arg('split_sru_lookahead', '2.0', '平地 SRU 前瞻 (m)'),
         arg('split_min_lookahead', '0.8', '自适应前瞻 >= 该值才拆分 (m)'),
+        arg('split_attn_mode', 'ray', '注意力目标: ray=沿长 carrot 方位取短距离(默认) | path=路径上的点'),
 
         # 终点航向对齐
         arg('enable_terminal_heading_align', 'true', '启用终点航向对齐'),
@@ -174,6 +175,7 @@ def generate_launch_description():
         'split_attn_lookahead': _float('split_attn_lookahead'),
         'split_sru_lookahead': _float('split_sru_lookahead'),
         'split_min_lookahead': _float('split_min_lookahead'),
+        'split_attn_mode': LaunchConfiguration('split_attn_mode'),
 
         'enable_terminal_heading_align': _bool('enable_terminal_heading_align'),
         'terminal_heading_tol': _float('terminal_heading_tol'),

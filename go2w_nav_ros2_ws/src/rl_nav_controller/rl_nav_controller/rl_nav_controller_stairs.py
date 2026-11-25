@@ -83,10 +83,18 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         self.declare_parameter('split_attn_lookahead', 0.4)
         self.declare_parameter('split_sru_lookahead', 2.0)
         self.declare_parameter('split_min_lookahead', 0.8)
+        # ray: attention point = split_attn_lookahead metres from the robot along the
+        #      long carrot's bearing (default, avoids the bearing blow-up that makes
+        #      the robot spin in place);  path: the path point at that arc length.
+        self.declare_parameter('split_attn_mode', 'ray')
         self.split_target = bool(self.get_parameter('split_target').value)
         self.split_attn_lookahead = float(self.get_parameter('split_attn_lookahead').value)
         self.split_sru_lookahead = float(self.get_parameter('split_sru_lookahead').value)
         self.split_min_lookahead = float(self.get_parameter('split_min_lookahead').value)
+        self.split_attn_mode = str(self.get_parameter('split_attn_mode').value).strip().lower()
+        if self.split_attn_mode not in ('ray', 'path'):
+            self.get_logger().warn(f'Unknown split_attn_mode {self.split_attn_mode!r}, using ray')
+            self.split_attn_mode = 'ray'
 
         # Ensure segment_arrive_threshold is realistically tuned for quadruped stair/terrain navigation (default 0.20m)
         if hasattr(self, 'arrive_goal_threshold') and self.arrive_goal_threshold is not None:
@@ -206,7 +214,36 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
             )
         self.target_pos_w_sru = None
 
-    def _apply_split_target(self, carrot_pt, lookahead):
+    def _short_attn_point(self, far_pt, robot_pos):
+        """A point `split_attn_lookahead` from the robot on the ray towards far_pt.
+
+        Taking the *path point* at 0.6 m instead makes the bearing explode as soon
+        as the robot is a little off the path: 0.6 m ahead and 0.5 m to the side is
+        already 40 deg, and a path that bends near the robot can put the point
+        beside or behind it. The policy answers a target beyond ~90 deg with
+        backward + turn, i.e. it spins on the spot and never advances, so progress
+        never updates and it stays stuck. Keeping the long carrot's bearing and
+        shortening only the distance keeps the "is it open ahead?" signal without
+        that failure mode.
+        """
+        if far_pt is None or robot_pos is None:
+            return None
+        dx = float(far_pt[0]) - float(robot_pos[0])
+        dy = float(far_pt[1]) - float(robot_pos[1])
+        dz = 0.0
+        if len(far_pt) > 2 and len(robot_pos) > 2:
+            dz = float(far_pt[2]) - float(robot_pos[2])
+        r = math.hypot(dx, dy)
+        if r < 1e-3:
+            return None
+        k = self.split_attn_lookahead / r
+        return [
+            float(robot_pos[0]) + dx * k,
+            float(robot_pos[1]) + dy * k,
+            float(robot_pos[2]) + dz * k,
+        ]
+
+    def _apply_split_target(self, carrot_pt, lookahead, robot_pos=None):
         """Pick the target(s) for this control step.
 
         Returns the target that goes to the cross-attention query (also stored in
@@ -220,15 +257,21 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         if not self.split_target or lookahead < self.split_min_lookahead:
             return carrot_pt
 
-        attn_pt, _ = self.path_tracker.get_lookahead_point(lookahead_dist=self.split_attn_lookahead)
         sru_pt, _ = self.path_tracker.get_lookahead_point(lookahead_dist=self.split_sru_lookahead)
-        if attn_pt is None or sru_pt is None:
+        if sru_pt is None:
+            return carrot_pt
+
+        if self.split_attn_mode == 'path':
+            attn_pt, _ = self.path_tracker.get_lookahead_point(lookahead_dist=self.split_attn_lookahead)
+        else:
+            attn_pt = self._short_attn_point(sru_pt, robot_pos)
+        if attn_pt is None:
             return carrot_pt
 
         self.target_pos_w_sru = sru_pt
         self.get_logger().info(
             f'[SplitTarget] attn_L={self.split_attn_lookahead:.2f}m sru_L={self.split_sru_lookahead:.2f}m '
-            f'(adaptive_L={lookahead:.2f}m)',
+            f'(adaptive_L={lookahead:.2f}m, mode={self.split_attn_mode})',
             throttle_duration_sec=2.0
         )
         return attn_pt
@@ -672,7 +715,11 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                     current_time=self.robot_odom_time,
                     depth_image=self.depth_image
                 )
-                self.target_pos_w = self._apply_split_target(carrot_pt, debug_info.get("lookahead", 0.0))
+                self.target_pos_w = self._apply_split_target(
+                    carrot_pt,
+                    debug_info.get("lookahead", 0.0),
+                    pos_for_tracking if pos_for_tracking is not None else self.robot_pos_w,
+                )
                 self.target_yaw_w = carrot_yaw
                 self._publish_adaptive_debug(debug_info)
                 self.get_logger().info(
@@ -873,6 +920,9 @@ def main(args=None):
                         help='SRU lookahead on flat ground (default: 2.0m)')
     parser.add_argument('--split-min-lookahead', type=float, default=None,
                         help='Only split when the adaptive lookahead is >= this (corner guard, default: 0.8m)')
+    parser.add_argument('--split-attn-mode', choices=['ray', 'path'], default=None,
+                        help='Attention target: ray = short distance along the long carrot bearing (default), '
+                             'path = path point at that arc length')
 
     # Terminal heading alignment CLI arguments
     parser.add_argument('--heading-align', dest='enable_terminal_heading_align', action='store_true', default=None, help='Enable terminal goal heading alignment')
@@ -1033,6 +1083,8 @@ def main(args=None):
         node.split_sru_lookahead = known_args.split_sru_lookahead
     if known_args.split_min_lookahead is not None:
         node.split_min_lookahead = known_args.split_min_lookahead
+    if known_args.split_attn_mode is not None:
+        node.split_attn_mode = known_args.split_attn_mode
     if node.split_target and not getattr(node.model, 'has_attn_prop', False):
         node.get_logger().error(
             'split_target is enabled, but the loaded policy has no attn_prop input: '
@@ -1077,6 +1129,7 @@ def main(args=None):
     node.get_logger().info(
         f'Policy: {policy_model_path} | split_target={node.split_target} '
         f'(attn_L={node.split_attn_lookahead:.2f}m, sru_L={node.split_sru_lookahead:.2f}m, '
+        f'mode={node.split_attn_mode}, '
         f'split_only_if_adaptive_L>={node.split_min_lookahead:.2f}m; stairs/corners keep one target)'
     )
 
