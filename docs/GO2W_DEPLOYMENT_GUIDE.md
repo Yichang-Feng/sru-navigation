@@ -96,7 +96,7 @@ cd ~/sru_ws
 ./start_go2w_system.sh
 ```
 
-`start_nav.sh` 默认参数（当前实测最佳）：`curvature_only` 平地前瞻、下楼锁存 0.40m、上楼锁存 0.45m、到达判定 0.20m、终点朝向对齐开启（tol 0.26 rad）、停滞报错开启、深度重映射关闭。参数列表见 `start_nav.sh -h`。
+`start_nav.sh` 默认参数（当前实测最佳）：`curvature_only` 平地前瞻、前瞻上界 2.0m、下楼锁存 0.40m、上楼锁存 0.45m、到达判定 0.45m、终点朝向对齐开启（进入转身 0.50m / 放弃 0.60m，tol 0.26 rad）、停滞报错开启、深度重映射关闭。参数列表见 `start_nav.sh -h`。
 
 ### 3.2 方式 B：分步启动（排错与调试备查）
 

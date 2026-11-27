@@ -71,9 +71,9 @@ def generate_launch_description():
         arg('start_navi_topic', '/startNavi', '底盘安全总闸话题'),
         arg('motion_enable_topic', '/motion_enabled', '手柄 A/B 运动门话题'),
         arg('odom_topic', '/lio/robo/odom', '里程计话题'),
-        arg('auto_unlock_bridge', 'true', '首次收到里程计后自动打开底盘门'),
+        arg('auto_unlock_bridge', 'true', '首次收到里程计后置 /startNavi=True（不自动打开 /motion_enabled，需 START/A 放行）'),
         arg('path_frame_id', '', '路径坐标系，空=自动匹配'),
-        arg('lookahead_distance', '1.0', '固定前瞻距离 (m)'),
+        arg('lookahead_distance', '2.0', '固定前瞻距离 (m)'),
         arg('camera_timeout', '2.0', '深度帧超时看门狗 (s)'),
         arg('goal_reached_timeout', '1.0', '到点后转 idle 延时 (s)'),
         arg('blocked_timeout', '4.0', '停滞判定超时 (s)'),
@@ -91,7 +91,7 @@ def generate_launch_description():
         arg('enable_adaptive_lookahead', 'true', '启用动态前瞻'),
         arg('adaptive_mode', 'curvature_only', 'both | curvature_only | clearance_only | none'),
         arg('lookahead_min', '0.4', '自适应前瞻下界 (m)'),
-        arg('lookahead_max', '1.0', '自适应前瞻上界 (m)'),
+        arg('lookahead_max', '2.0', '自适应前瞻上界 (m)'),
         arg('adaptive_window_dist', '1.6', '曲率前瞻窗口 (m)'),
         arg('turn_angle_low_deg', '20.0', '曲率下阈值 (deg)'),
         arg('turn_angle_high_deg', '50.0', '曲率上阈值 (deg)'),
@@ -118,8 +118,8 @@ def generate_launch_description():
         # 终点航向对齐
         arg('enable_terminal_heading_align', 'true', '启用终点航向对齐'),
         arg('terminal_heading_tol', '0.26', '航向容差 (rad)'),
-        arg('terminal_align_enter_dist', '0.20', '允许进入转身的距离 (m)'),
-        arg('terminal_align_abort_dist', '0.40', '放弃转身的距离 (m)'),
+        arg('terminal_align_enter_dist', '0.50', '允许进入转身的距离 (m)'),
+        arg('terminal_align_abort_dist', '0.60', '放弃转身的距离 (m)'),
         arg('terminal_align_lever_arm', '0.55', '原地旋转杠杆臂 (m)'),
     ]
 

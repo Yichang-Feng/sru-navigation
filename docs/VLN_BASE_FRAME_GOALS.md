@@ -99,13 +99,12 @@ p_world = R(robot_yaw/pitch/roll) * p_base + p_robot
 
 ### 3.4 手动暂停优先
 
-为避免持续以 5 Hz 发点的 VLN 把人工急停“顶回去”，以下操作会锁存暂停状态：
+为避免持续以 5 Hz 发点的 VLN 把人工急停“顶回去”，以下操作会锁存暂停/急停意图：
 
-- 遥控器 B 键（`/rsl_joy`）；
-- `/motion_enabled = false`（宇树遥控 B / 桥接急停）；
-- `/mission/control: "pause"`。
+- 遥控器 B 键（`/rsl_joy`）或 `/motion_enabled = false`（宇树遥控 B / 桥接急停）→ **底盘急停，状态保持 `RUNNING`**；
+- `/mission/control: "pause"` → **任务暂停，状态进入 `STOPPED`**。
 
-暂停期间 VLN 继续发点只会更新目标，机器人保持 `STOPPED` 不动；按遥控器 A、发布 `/motion_enabled = true` 或 `/mission/control: "resume"` 解除锁存，下一帧 VLN 点即恢复 `RUNNING`。
+B 急停期间 VLN 继续发点只会更新目标，状态保持 `RUNNING` 但底盘刹停、不会误报 `failed`；按遥控器 A 或发布 `/motion_enabled = true` 解除急停并重新开始 4.0s 停滞计时，4.0s 内无位移才进入 `FAILED`。mission pause 则保持 `STOPPED`，由 `/mission/control: "resume"` 恢复。
 
 ### 3.5 与全局路径 / RViz 共存
 

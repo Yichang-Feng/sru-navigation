@@ -2,7 +2,7 @@
 
 > 合并自原 `GO2W_LOCAL_SRU_VS_GLOBAL_NAV_ARCHITECTURE.md` 与 `GLOBAL_NAV_INTEGRATION_SPEC.md`（v1.2）。
 > 本文档以代码为准：`rl_nav_controller/rl_nav_controller/rl_nav_controller.py`、`adaptive_path_tracker.py`、`constants.py`、`start_nav.sh`。
-> 已修正原 spec 中与代码不符的数值：心跳 1.0 Hz（非 3Hz）、到达阈值 0.20m（非 0.15m）、状态机 6 态（含 error）、路径跟踪器为 `adaptive_path_tracker.py`。
+> 已修正原 spec 中与代码不符的数值：心跳 1.0 Hz（非 3Hz）、全局路径段到达阈值 0.45m（非 0.15m）、状态机 6 态（含 error）、路径跟踪器为 `adaptive_path_tracker.py`。
 
 ---
 
@@ -12,11 +12,11 @@
 +--------------------------------------------------------------------------------------------------+
 |                                    Unitree Go2W 统一控制基座                                      |
 |                                                                                                  |
-|   遥控手柄控制统一: [B 键] -> 紧急制动 / 暂停 (/motion_enabled=False)                              |
-|                    [A 键] -> 开闸启动 / 恢复推进 (/motion_enabled=True)                             |
+|   遥控手柄控制统一: [B 键] -> 底盘急停（状态保持 running，永不判 failed）(/motion_enabled=False)   |
+|                    [A 键] -> 解除急停 / 恢复推进并重新计时 4.0s (/motion_enabled=True)              |
 |                                                                                                  |
 |   到达判定距离统一: 单点导航 ARRIVE_GOAL_THRESHOLD = 0.20m                                        |
-|                    全局路径 SEGMENT_ARRIVE_THRESHOLD = 0.20m                                     |
+|                    全局路径 SEGMENT_ARRIVE_THRESHOLD = 0.45m                                    |
 +--------------------------------------------------------------------------------------------------+
                                         |
                  +----------------------+----------------------+
@@ -76,7 +76,7 @@
 | 6 | 底盘与手柄安全桥 | `go2w_bridge/launch/go2w_bridge.launch.py` | 运行 `go2w_cmd_vel_bridge` 与 `go2w_wireless_controller`（B 刹停、A 恢复） |
 | 7 | 全局规划器 | `global_planner/launch/global_planner.launch.py` | 基于 3D 点云栅格地图生成全局最优无碰撞路径，向 `/global_path` 逐段下发 |
 | 8 | 楼梯感知局部控制器 | `src/rl_nav_controller/rl_nav_controller/rl_nav_controller_stairs.py` | 集成楼梯 3D 坡度门控（下坡 0.40m、上坡 0.45m 前瞻）、曲率前瞻自适应、终点航向对齐与状态机 |
-| 9 | 几何路径追踪器 | `src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py` | 计算当前投影进度、胡萝卜点插值、曲率估计与终点到达判定（`check_arrived`，阈值 0.20m） |
+| 9 | 几何路径追踪器 | `src/rl_nav_controller/rl_nav_controller/adaptive_path_tracker.py` | 计算当前投影进度、胡萝卜点插值、曲率估计与终点到达判定（`check_arrived`，默认阈值 0.45m） |
 | 10 | 楼梯深度图处理器 | `src/rl_nav_controller/rl_nav_controller/stairs_depth_processor.py` | 楼梯斜坡点云与深度图重映射适配工具 |
 | 11 | 核心避障基类 | `src/rl_nav_controller/rl_nav_controller/rl_nav_controller.py` & `rl_nav_controller_adaptive.py` | 底层推理引擎、TF 转换、手柄 A/B 恢复、底盘启闭安全总闸 |
 
@@ -87,12 +87,12 @@
 | 启动命令 | `cd ~/sru_ws && ./start_local_sru.sh` | `cd ~/go2w_nav_ros2_ws && ./start_nav.sh` | 独立区分，清晰明确 |
 | 停止命令 | `cd ~/sru_ws && ./stop_local_sru.sh` | `cd ~/go2w_nav_ros2_ws && ./stop_nav.sh` | 各自独立，互不污染 |
 | 进程管理 | 后台 `nohup / &` + `trap cleanup` | `tmux` 动态分屏交互式多会话 | 适配不同使用场景 |
-| 手柄遥控暂停 | 按 [B] 进入 `STOPPED`，制动停机，保留目标 | 按 [B] 进入 `STOPPED`，制动停机，保留路径 | 完全对齐 |
-| 手柄遥控启动 | 按 [A] 开闸解禁，恢复向单点目标推进 | 按 [A] 开闸解禁，重对齐并恢复路径追踪 | 完全对齐 |
+| 手柄遥控暂停 | 按 [B] 底盘急停，状态保持 `RUNNING`（任务未中止，永不误报 `failed`） | 按 [B] 底盘急停，状态保持 `RUNNING`（任务未中止，永不误报 `failed`） | 完全对齐；`stopped` 仅由 `/mission/control: pause` 产生 |
+| 手柄遥控启动 | 按 [A] 解除急停，恢复向单点目标推进并重新开始 4.0s 停滞计时 | 按 [A] 解除急停，重对齐路径并重新开始 4.0s 停滞计时 | 完全对齐 |
 | 底盘硬件桥 | `go2w_bridge`（优先）/ `unitree_bridge`（兜底） | `go2w_bridge` | 统一使用 go2w_bridge |
-| 底盘安全总闸 | `/motion_enabled` & `/startNavi` 联动 | `/motion_enabled` & `/startNavi` 联动 | 完全对齐 |
-| 目标到达判定 | `arrive_goal_threshold = 0.20m` | `segment_arrive_threshold = 0.20m` | 完全对齐为 0.20m |
-| 原地漂移容差 | `0.40m` | `0.40m` | 完全对齐 |
+| 底盘安全总闸 | `/startNavi` 启动置 true；`/motion_enabled` 由 START/A 放行 | `/startNavi` 启动置 true；`/motion_enabled` 由 START/A 放行 | 完全对齐 |
+| 目标到达判定 | `arrive_goal_threshold = 0.20m` | `segment_arrive_threshold = 0.45m` | 全局路径段 0.45m |
+| 原地漂移容差 | `0.40m` | `terminal_align_abort_dist = 0.60m` | 全局路径段 0.60m |
 | 路径规划器 | 无（直连单点目标） | `global_planner` 自动全局路径生成 | 按需分层 |
 | 楼梯/坡度感知 | 依赖纯深度图原生策略感知 | 动态 3D 路径坡度门控（下坡 0.4m / 上坡 0.45m） | 全局层增强 |
 | 状态机上报 | 瞬发 `idle/running/goal_reached/stop` | 3Hz 周期 + 瞬发 `idle/running/arrived/blocked/stop` | 向下完全兼容 |
@@ -117,7 +117,7 @@ sequenceDiagram
         C->>R: 前瞻胡萝卜点引导 + ZED 深度避障 -> /cmd_vel
         C->>G: 1Hz 周期心跳: "running"
     end
-    Note over C,R: 到达第一段最终点 (距离 < 0.20m)
+    Note over C,R: 到达第一段最终点 (距离 < 0.45m)
     C->>R: 主动刹停 (/cmd_vel = 0)
     Note over C: 状态跃迁: RUNNING -> ARRIVED
     C-->>G: 毫秒级瞬时上报: "arrived" (并维持 1Hz 心跳)
@@ -151,11 +151,11 @@ sequenceDiagram
 | 状态值 (`state`) | 附带消息 (`msgs`) | 状态语义 | 触发条件与恢复策略 | 机体动作 |
 | :--- | :--- | :--- | :--- | :--- |
 | `"idle"` | `[]` | 空闲就绪 | 节点启动就绪、或已完成全流程且无路径任务。收到新路径直接跃迁至 `running` | 原地站立静止，等待新路径 |
-| `"running"` | `[]` | 任务执行中 | 收到有效全局 Path、或在 `stopped` / `failed` 状态下收到 `resume` 指令恢复执行 | 按前瞻胡萝卜点推进，ZED 深度自主避障 |
-| `"goal_reached"` | `[]` | 本段路径已到达 | 距离当前段 Path 的**最终目标点** < 0.20m。主动刹停置零速度，清除已完成目标，瞬发上报后立刻变至 `idle`，构成单向闭环三角（`idle -> running -> goal_reached -> idle`） | 主动刹停 |
-| `"failed"` | `[]` | 规划受阻/死锁停滞 | 前方被障碍物完全封堵，连续停滞超时（默认 >4.0s）。**可恢复**：上层重发 `/global_path` 或发送 `resume` 即可脱困继续 | 主动减速刹停，避免顶撞障碍物，等待上层重规划 |
+| `"running"` | `[]` | 任务执行中 | 收到有效全局 Path、或在 `stopped` / `failed` 状态下收到 `resume` 指令恢复执行。**手柄 B 急停期间状态保持 `running`**（任务未中止，底盘急停） | 按前瞻胡萝卜点推进，ZED 深度自主避障 |
+| `"goal_reached"` | `[]` | 本段路径已到达 | 距离当前段 Path 的**最终目标点** < 0.45m。主动刹停置零速度，清除已完成目标，瞬发上报后立刻变至 `idle`，构成单向闭环三角（`idle -> running -> goal_reached -> idle`） | 主动刹停 |
+| `"failed"` | `[]` | 规划受阻/死锁停滞 | 前方被障碍物完全封堵，连续停滞超时（默认 >4.0s）。该窗口在手柄 **A 解除急停后重新开始计时**，B 急停期间持续清零、不会触发。**可恢复**：上层重发 `/global_path` 或发送 `resume` 即可脱困继续 | 主动减速刹停，避免顶撞障碍物，等待上层重规划 |
 | `"error"` | `["zed_camera_lost"]` | 传感器/硬件致命异常 | ZED 相机深度帧连续中断超时（>2.0s）。**不可自动恢复**：此时下发新路径会被主动拒绝，需检查硬件连线或重启终端 | 主动减速刹停，拒绝接收新路径，等待重启/硬件恢复 |
-| `"stopped"` | `[]` | 停止/暂停 | 收到上层指令 (`/mission/control: "pause"` 或 `"stop"`)、现场手柄按 ABORT、或收到空路径 | 原地紧急制动刹停，**自动在内存中保留未跑完路径**。停后收新路径仍保持 stopped（仅更新内存路径），只有收到 `"resume"` 才会重新启动 |
+| `"stopped"` | `[]` | 任务暂停 | 收到上层指令 (`/mission/control: "pause"` 或 `"stop"`) 或收到空路径。**手柄 B 不再进入 stopped** | 原地紧急制动刹停，**自动在内存中保留未跑完路径**。停后收新路径仍保持 stopped（仅更新内存路径），只有收到 `"resume"` 才会重新启动 |
 
 > **标准上报格式示例**：
 > - 正常行走：`{"state":"running","msgs":[]}`
@@ -173,17 +173,23 @@ sequenceDiagram
 - **低频周期心跳（1Hz）**：若无状态切换，以 1Hz 频率周期性广播当前 JSON 状态；
   - 到达状态 (`"goal_reached"`) 在到点时瞬发上报一次后立刻变至 `idle`；在 `idle` 下以 1Hz 心跳广播并持续监听新路径，一旦收到新路径直接跃迁至 `running`；
 - **事件驱动瞬发**：状态跃迁的当个控制循环瞬时立即发布，包括：
-  1. 进入最终点 <0.20m 的瞬间 → 立即发布 `{"state":"goal_reached","msgs":[]}` 并立刻变至 `idle`；
+  1. 进入最终点 <0.45m 的瞬间 → 立即发布 `{"state":"goal_reached","msgs":[]}` 并立刻变至 `idle`；
   2. 进入 `idle` 后以 1Hz 广播心跳，持续监测新路径；
   3. 停滞超时的瞬间 → 立即发布 `{"state":"failed","msgs":[]}`；
   4. 相机掉线超时的瞬间 → 立即发布 `{"state":"error","msgs":["zed_camera_lost"]}`；
   5. 收到 `/mission/control: "pause"` 或 `"stop"` 的瞬间 → 立即发布 `{"state":"stopped","msgs":[]}`；
   6. 处于 `stopped` 下收到新路径 → 仅更新内存路径，保持 `stopped` 且不自启；
-  7. 收到 `"resume"` / `"continue"` 或在非 stopped 状态下收到新路径启动的瞬间 → 立即发布 `{"state":"running","msgs":[]}`。
+  7. 收到 `"resume"` / `"continue"` 或在非 stopped 状态下收到新路径启动的瞬间 → 立即发布 `{"state":"running","msgs":[]}`；
+  8. 手柄 B（`/motion_enabled=False`）→ 不切换状态，继续 1Hz 上报 `{"state":"running","msgs":[]}`；
+  9. 手柄 A（`/motion_enabled=True`）→ 保持 `running`，重新开始 4.0s 停滞计时。
 
-> **`stopped` 状态不变式（重要）**：`stopped` 是"暂停锁存"，按状态图它**只有一条出边**——显式恢复（手柄 A / `resume`）回到 `running`。
+> **手柄 B/A 急停语义（重要）**：B 是底盘急停而非任务中止。
+> - B 期间导航状态保持 `running`（有任务时），路径/目标保留，控制器每周期置零速度；`chassis_motion_enabled=False` 时停滞检测窗口持续重置，`set_state()` 亦直接拒绝 `failed`，因此**急停多久都不会报 `failed`**。
+> - A 清除暂停闩锁、按当前位姿对齐路径进度并重新开始 4.0s 窗口；**A 后 4.0s 内位移 <0.1m 且速度 <0.1m/s 才 → `failed`**。
+> - `stopped` 只由 `/mission/control: "pause"/"stop"` 或空路径产生。
+
+> **`stopped` 状态不变式（重要）**：`stopped` 是"任务暂停锁存"，按状态图它**只有一条出边**——显式恢复（手柄 A / `resume`）回到 `running`。
 > - `stopped` **永远不会**自动变成 `failed`；`set_state()` 会直接拒绝 `stopped -> failed` 的跃迁并打印 `[NavState] Refused illegal transition`。
-> - 底盘运动门（`/motion_enabled=False`，B 键）关闭期间，控制回路把停滞检测窗口持续重置，**不会**触发停滞超时（门关着本来就不该有位移）。
 > - 暂停期间收到新 `/global_path` 或 `/goal_3d` 只更新内存中的目标/路径，保持 `stopped`。
 > - 重复/回放的 `/motion_enabled=True`（两个 bridge 同一次 A 的重复消息）不会被当成恢复请求。
 
@@ -255,7 +261,7 @@ flowchart TD
 | 话题名称 (Topic) | 通信方向 | ROS 2 消息类型 | 频率 / 触发机制 | 对应的节点参数 (Parameter) | 字段定义与控制语义 |
 | :--- | :---: | :--- | :--- | :--- | :--- |
 | **`/global_path`** | 上层 → 控制器（控制器订阅） | `nav_msgs/msg/Path` | 每次下发一段局域路径时发布一次 | `path_topic`（默认 `"/global_path"`） | **分段全局路径输入**。`header.frame_id`：坐标系（推荐 `"world"` 或 `"map"`）；`header.stamp`：生成时间戳；`poses`：散点列表，每点 `PoseStamped`（position x/y/z 单位米；末点若包含朝向要求则填入有效四元数，否则沿路径切向自然停机）。**路径覆盖规则**：任何时刻（包括推进中或 `STOP` 停顿时）下发新路径，控制器立即切换至新路径执行 |
-| **`/local_planner/status`** | 控制器 → 上层（控制器发布） | `std_msgs/msg/String` | 1Hz 固定周期心跳 + 状态跃迁毫秒级瞬发 | `status_topic`（默认 `"/local_planner/status"`） | **多状态生命周期上报（6 态）**。数据内容为字符串 (`msg.data`)，上层据此执行逐段推进判断：`"idle"` 空闲就绪等待新路径；`"running"` 正在沿路径推进或绕障；`"goal_reached"` 到达本段终点（<0.20m），速度已主动刹停，提示上层立刻派发下一段；`"failed"` 前方封死连续 4.0s 进尺 <0.1m，提示上层重规划；`"error"` 传感器/硬件致命异常；`"stopped"` 停止/暂停状态，底盘主动刹停，已自动保留当前路径 |
+| **`/local_planner/status`** | 控制器 → 上层（控制器发布） | `std_msgs/msg/String` | 1Hz 固定周期心跳 + 状态跃迁毫秒级瞬发 | `status_topic`（默认 `"/local_planner/status"`） | **多状态生命周期上报（6 态）**。数据内容为字符串 (`msg.data`)，上层据此执行逐段推进判断：`"idle"` 空闲就绪等待新路径；`"running"` 正在沿路径推进或绕障；`"goal_reached"` 到达本段终点（<0.45m），速度已主动刹停，提示上层立刻派发下一段；`"failed"` 前方封死连续 4.0s 进尺 <0.1m，提示上层重规划；`"error"` 传感器/硬件致命异常；`"stopped"` 任务暂停状态，底盘主动刹停，已自动保留当前路径 |
 | **`/mission/control`** | 上层 → 控制器（控制器订阅） | `std_msgs/msg/String` | 事件触发（可选） | `stop_topic`（默认 `"/mission/control"`） | **任务启停控制指令**。`"stop"`：停止指令，底盘主动制动刹停（速度置零），状态变更为 `stopped`，系统默认自动保留当前未跑完的路径与进度；`"continue"`：继续推进，状态变更为 `running`，从当前位置继续沿保留路径无缝推进 |
 
 > **关键认知纠偏**：上层只需向 `/global_path` 下发路径。控制器收到路径后，**下层控制器自己会把状态跃迁为 `running` 并通过 `/local_planner/status` 上报**！上层**不需要、也不能**发布名为 `running` 的话题。上层的正确逻辑是**单向监听 `/local_planner/status`**：
@@ -269,8 +275,9 @@ flowchart TD
 
 1. **自动保留当前路径（Path Retention by Default）**：当上层发布 `/mission/control: "stop"` 时，控制器执行紧急主动制动（速度置零），进入 `stopped` 状态；内部路径追踪器（`path_tracker`）**默认完整保留未跑完路径和进度弧长 s**，不予清除；后续上层只要发送 `/mission/control: "continue"`，状态自动恢复为 `running`，机器狗立刻从暂停点无缝继续跑完剩余路径。
 2. **接收新路径自动覆盖（New Path Preemption & Override）**：无论机器人当前处于 `running` 推进中、还是 `stopped` 停止中、亦或是 `failed` 停滞中；一旦上层下发了新的 `/global_path`（或 `/goal_3d` 单目标），控制器**优先以最新目标为准**：载入新路径并重置进度（s=0）与停滞探测器，状态跃迁为 `running` 开始推进。
-   **唯一例外——手动暂停锁存（manual pause latched）**：若暂停来自现场 B 键 / 底盘 `motion_enabled=False` / `/mission/control: "pause"`，且尚未按 A（或发送 `resume`）解除，则收到新目标时**只更新内存中的目标与路径并保持 `stopped`**，不会自启。否则底盘门（`joystick_control_`）仍关闭，机器狗无法移动，4.0s 后停滞检测会误报 `{"state":"failed"}`——这正是"按 B 停下后重新下发路径、未立刻按 A 就报 failed"的成因。
-3. **彻底取消任务（Explicit Cancel）**：若现场手柄按下 ABORT 紧急取消键，或上层下发**空路径** (`Path(poses=[])`)，控制器将彻底清空路径缓存，刹停并保持在 `stopped` 状态。
+   **例外一——任务暂停锁存（mission pause）**：若 `stopped` 来自 `/mission/control: "pause"/"stop"`，收到新目标时**只更新内存中的目标与路径并保持 `stopped`**，直到发送 `resume`。
+   **例外二——手柄 B 急停**：B 只关闭底盘运动门（`/motion_enabled=False`），**状态仍为 `running`**；期间收到新目标同样只更新内存目标/路径并保持 `running`、底盘继续刹停。因为门关着本来就不该有位移，停滞检测窗口每周期清零且 `failed` 转移被拒绝，不会误报 `failed`；按 A 后重新计时，4.0s 无位移才报 `failed`。
+3. **彻底取消任务（Explicit Cancel）**：上层下发**空路径** (`Path(poses=[])`) 时，控制器清空路径缓存、刹停并进入 `stopped` 状态。手柄 B 不再作为取消键（仅底盘急停），如需取消任务请发送 `pause`/`stop` 或空路径。
 
 ```mermaid
 stateDiagram-v2
@@ -286,7 +293,7 @@ stateDiagram-v2
     STOPPED --> RUNNING: 接收到全新 /global_path (直接切换新路径执行)
     RUNNING --> RUNNING: 接收到全新 /global_path (立刻覆盖切换新路径)
 
-    RUNNING --> GOAL_REACHED: 距段终点 < 0.20m (主动置零刹停)
+    RUNNING --> GOAL_REACHED: 距段终点 < 0.45m (主动置零刹停)
     GOAL_REACHED --> RUNNING: 调度器收到 goal_reached 并派发下一段 Path
 
     RUNNING --> FAILED: 连续 4.0s 进尺 < 0.1m
@@ -301,7 +308,7 @@ stateDiagram-v2
 
 | 话题名称 (Topic) | 通信方向 | ROS 2 消息类型 | 频率 | 对应的节点参数 (Parameter) | 控制语义与保护机制 |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| **`/startNavi`** | 控制器 → 底盘桥（控制器发布） | `std_msgs/msg/Bool` | 事件触发 | `start_navi_topic`（默认 `"/startNavi"`）<br>`auto_unlock_bridge`（默认 `true`） | **底盘安全总闸开/闭**。`data: true`：开闸使能运动。控制器收到第 1 帧有效雷达里程计（`/lio/robo/odom`）后**全自动发布 `true` 解锁**，无需人工手动开闸；`data: false`：节点退出、异常中断或按 Ctrl+C 时**安全发布 `false` 锁死底盘** |
+| **`/startNavi`** | 控制器 → 底盘桥（控制器发布） | `std_msgs/msg/Bool` | 事件触发 | `start_navi_topic`（默认 `"/startNavi"`）<br>`auto_unlock_bridge`（默认 `true`） | **底盘安全总闸开/闭**。`data: true`：开闸使能运动。控制器收到第 1 帧有效雷达里程计（`/lio/robo/odom`）后**自动发布 `true` 解锁**；`/motion_enabled` 不随之自动打开，需手柄 START/A 放行。`data: false`：节点退出、异常中断或按 Ctrl+C 时**安全发布 `false` 锁死底盘** |
 | **`/cmd_vel`**<br/>（兼旧版 `/path_manager/path_manager_ros/nav_vel`） | 控制器 → 底盘桥（控制器发布） | `geometry_msgs/msg/Twist` | 10Hz ~ 15Hz（与策略同步） | `cmd_vel_topic`（默认 `"/cmd_vel"`） | **轮足底盘运动速度指令**。`linear.x`：前进线速度，范围 [-1.0, 1.5] m/s；`linear.y`：横向侧移，范围 [-0.6, 0.6] m/s；`angular.z`：原地转向，范围 [-1.5, 1.5] rad/s；`linear.z = angular.x = angular.y = 0.0`。在 `STOPPED`、`GOAL_REACHED`、`FAILED` 状态下，控制器自动主动发布零速制动 |
 | **`/walle_nav/robot_base_vel`** | 控制器 → 系统（控制器发布） | `geometry_msgs/msg/Twist` | 随里程计触发（~20Hz） | — | **机体坐标系（Base Frame）对地测速反馈**。将雷达里程计在世界系下的三维速度，利用四元数动态转换到当前机器狗机体坐标系下发布，供内部状态观测和外部监控 |
 
@@ -360,6 +367,8 @@ flowchart TD
 1. **开机自投使能**：在导航节点检测到首次收到里程计 `/lio/robo/odom` 且环境感知初始化完毕后，由节点内置的 `self.start_nav_publisher` 自动向 `/startNavi` 发布 `{data: true}`；
 2. **退出自闭保护**：在节点析构或捕捉到 `SIGINT`（Ctrl+C）时，自动向 `/startNavi` 发布 `{data: false}`，实现无人值守、即开即用、安全闭环。
 
+> **注意**：`/motion_enabled` 不再随 `/startNavi` 自动打开（底盘运动门默认闭合），需手柄 START/A 或外部 `/motion_enabled=True` 放行；在此之前停滞检测窗口不累积、`failed` 转移被拒绝。
+
 ---
 
 ## 8. 核心避障算法：动态前瞻胡萝卜点在分段推进中的应用
@@ -375,7 +384,7 @@ P0 (起点,狗当前位) ------ P1 (1m) ------ P2 (2m 障碍物) ------ P3 (3m) 
 ```
 
 1. **段内巡航（L = 2.0m）**：即使本段内部的点间距仅为 0.5m 或 1.0m，RL 策略网络拿到的永远是沿路径前方 2.0m 的平滑虚拟点；避障网络始终处于大纵深舒适区间，横向侧偏避障敏捷，绝无"一顿一顿"的减速顿挫；
-2. **终点收敛（Approach Terminal Goal）**：当胡萝卜点触达本段终点 P4 无法再向前延伸时，胡萝卜点锚定在 P4；随着狗身逐渐接近 P4，到点距离进入自然衰减。当 `||P_robot − P4|| ≤ 0.20m` 时，触发自然到点；
+2. **终点收敛（Approach Terminal Goal）**：当胡萝卜点触达本段终点 P4 无法再向前延伸时，胡萝卜点锚定在 P4；随着狗身逐渐接近 P4，到点距离进入自然衰减。当 `||P_robot − P4|| ≤ 0.45m` 时，触发自然到点；
 3. **刹停并跃迁**：速度平稳降至 0；立即触发取消目标（Cancel Goal）清空状态；**瞬间向 `/local_planner/status` 发布 `"goal_reached"`**，通知上层调度系统派发下一段。
 
 ---
@@ -391,9 +400,9 @@ P0 (起点,狗当前位) ------ P1 (1m) ------ P2 (2m 障碍物) ------ P3 (3m) 
 | `status_topic` | string | `"/local_planner/status"` | 控制器向外发布的多状态上报话题名 (`std_msgs/msg/String`，6 个状态) |
 | `start_navi_topic` | string | `"/startNavi"` | 宇树底盘硬件网关安全使能开闸话题名 (`std_msgs/msg/Bool`) |
 | `cmd_vel_topic` | string | `"/cmd_vel"` | 下发给底盘的运动速度话题名 (`geometry_msgs/msg/Twist`) |
-| `auto_unlock_bridge` | bool | `true` | 开机自投使能：检测到首次里程计自动开闸，节点退出自动锁死底盘 |
+| `auto_unlock_bridge` | bool | `true` | 首次收到里程计后只置 `/startNavi=true`；**不自动打开 `/motion_enabled`**，需手柄 START/A 放行。节点退出时二者恢复 `false` |
 | `lookahead_distance` | float | `2.0` | 动态前瞻胡萝卜点距离 L（米）。沿路径前方截取虚拟引导点 |
-| `segment_arrive_threshold` | float | `0.20` | 本段最终目标点到达判定距离阈值（米）。<0.20m 触发刹停 |
+| `segment_arrive_threshold` | float | `0.45` | 本段最终目标点到达判定距离阈值（米）。<0.45m 触发刹停 |
 | `blocked_timeout` | float | `4.0` | 停滞超时阈值（秒）。连续超时未进尺判定为 `FAILED` |
 | `blocked_dist_threshold` | float | `0.1` | 停滞判定最小进尺增量阈值 Δs（米） |
 | `blocked_vel_threshold` | float | `0.1` | 停滞判定机身最小物理测速阈值 v_real（米/秒） |
@@ -427,7 +436,7 @@ stateDiagram-v2
         RLPredict --> OutputCmdVel: 下发 /cmd_vel 控制轮足底盘
     }
 
-    RUNNING --> GOAL_REACHED: 距段终点 < 0.20m (主动置零刹停 / 瞬发 goal_reached)
+    RUNNING --> GOAL_REACHED: 距段终点 < 0.45m (主动置零刹停 / 瞬发 goal_reached)
     GOAL_REACHED --> RUNNING: 调度器收到 goal_reached 并派发下一段 Path
 
     RUNNING --> FAILED: 连续 4.0s 进尺 < 0.1m 且速度 < 0.1m/s (主动刹停 / 瞬发 failed)
@@ -446,7 +455,7 @@ stateDiagram-v2
 #### 关键机制具体逻辑说明
 
 1. **瞬发 + 心跳混合上报 (`set_state`)**：每次调用 `set_state(new_state)` 时，系统在修改状态变量的当个控制循环瞬时直接调用 `self.publish_status_message()` 将字符串发布到 `/local_planner/status`；独立后台定时器以固定 1Hz 频率调用 `self.publish_status_heartbeat()` 持续广播 `self.state.value`，网络丢包时亦能保持状态可测。
-2. **前瞻胡萝卜点折线投影算法 (`AdaptivePathSegmentTracker`)**：接收到散点路径时，预计算各线段长度与累计弧长 S_total；每个控制步将机器狗物理坐标 P_robot(x,y) 正交投影至折线段上，得到当前进度弧长 s_curr；虚拟引导点取 s_target = s_curr + 2.0m 处的折线内插坐标；若 s_target ≥ S_total 则自动锚定至终点 P_end；终点判定采用欧氏距离：`||P_robot − P_end||_xy ≤ 0.20m`。
+2. **前瞻胡萝卜点折线投影算法 (`AdaptivePathSegmentTracker`)**：接收到散点路径时，预计算各线段长度与累计弧长 S_total；每个控制步将机器狗物理坐标 P_robot(x,y) 正交投影至折线段上，得到当前进度弧长 s_curr；虚拟引导点取 s_target = s_curr + 2.0m 处的折线内插坐标；若 s_target ≥ S_total 则自动锚定至终点 P_end；终点判定采用欧氏距离：`||P_robot − P_end||_xy ≤ 0.45m`。
 3. **连续停滞遇阻判定 (`BlockedDetector`)**：在 `RUNNING` 期间持续追踪时间窗口起点与参考弧长进度；若某时刻检测到弧长增量 Δs ≥ 0.1m 或机身对地测速 v_real ≥ 0.1m/s，立即滑动刷新时间窗口起点；仅当二者同时不达标且连续经过时长 Δt ≥ 4.0s 时，才判定为 `FAILED`。收到新路径立即调用 `reset()` 清空停滞状态。
 4. **TF2 动态适配与异常拦截**：若 `Path.header.frame_id` 为空或匹配机载里程计坐标系（`world` / `map`），直接采用；若为其他未知坐标系且环境存在 TF2，自动查找 `target_frame <- source_frame` 变换对所有路径点逐点变换；若 TF 树断裂无变换，高亮打印致命错误并丢弃异常路径，绝不盲目下发；安全自检：若转换后的路径第一个点与机器狗当前坐标直线距离超过 2.5m，控制台打印安全告警，防范参考系错位。
 5. **底盘开闭总闸自闭环 (`unlock_chassis` & `lock_chassis`)**：`odom_callback` 检测到首次收到有效里程计且 `auto_unlock_bridge == True` 时，自动向 `/startNavi` 发布 `{data: true}`；在节点析构 `destroy_node()` 与 `main()` 的 `finally` 异常保护块中，自动向 `/startNavi` 发布 `{data: false}`，实现零人工干预的启闭安全防护。
@@ -460,8 +469,8 @@ stateDiagram-v2
 | 1 | Path 坐标系名称与 TF 广播 | 若为空则默认为机载 SLAM 坐标系（`world`/`map`）；若为外层 frame 则通过 TF2 转换。首点偏差 >2.5m 告警 | 请上层规划器明确输出的 `header.frame_id` 是什么？全局调度节点是否会向 TF 树广播 `map -> odom` 或 `map -> world` 变换？ |
 | 2 | `FAILED` 状态后的重规划闭环 | 下层刹停置零速度并持续上报 `"failed"`，直到收到新 `/global_path` 自动恢复为 `RUNNING` | 确认上层业务逻辑：当上层接收到 `"failed"` 后，是自动触发全局避障绕路重规划下发新 Path 段，还是需要报警提示人工遥控接管？ |
 | 3 | 单段 Path 的点密度与长度规划 | 下层按连续折线处理，支持任意点间距（无论 0.5m、1.0m 或 2.0m 均可平滑追踪插值） | 确认上层规划器下发的平均单段长度是多少米？（如每段 3~5 个点约 3~5 米，还是更长？）段与段之间的下发间隔时延容忍度是多少？ |
-| 4 | `/mission/control` 启停与路径保留控制语义 | 发送 `"stop"` 触发急停刹停且状态设为 `STOPPED`（系统自动默认保留剩余路径）；发送 `"continue"` 恢复沿保留路径推进并进入 `RUNNING`。若在 `STOPPED` 或推进中接收到新 `/global_path`，直接覆盖切换新路径执行。手柄 ABORT 清空路径并进入 `STOPPED` | 已根据最新要求统一为 `/mission/control` (String) 和默认路径保留/新路径覆盖机制 |
-| 5 | 终点朝向（Terminal Heading）需求 | 下层检查最后一点的四元数，若 norm > 0.5 且模型包含 heading 则在终点进行偏航对齐；若无四元数则沿路径切向自然停机。当前默认 tol = 0.26 rad（≈15°），死区补偿 P 控制，5.0s 超时 + 0.40m 漂移保护 | 确认上层下发的终点是否带有机器狗姿态朝向约束需求？（详见 `GO2W_NAVIGATION_SYSTEM_GUIDE.md` §三.5） |
+| 4 | `/mission/control` 启停与路径保留控制语义 | 发送 `"stop"` 触发急停刹停且状态设为 `STOPPED`（系统自动默认保留剩余路径）；发送 `"continue"` 恢复沿保留路径推进并进入 `RUNNING`。若在 `STOPPED` 或推进中接收到新 `/global_path`，直接覆盖切换新路径执行。手柄 B/ABORT 仅底盘急停（状态保持 `RUNNING`、永不误判 `failed`），取消任务请发送 `pause`/`stop` 或空路径 | 已根据最新要求统一为 `/mission/control` (String) 和默认路径保留/新路径覆盖机制 |
+| 5 | 终点朝向（Terminal Heading）需求 | 下层检查最后一点的四元数，若 norm > 0.5 且模型包含 heading 则在终点进行偏航对齐；若无四元数则沿路径切向自然停机。当前默认 tol = 0.26 rad（≈15°），死区补偿 P 控制，进入转身 0.50m、5.0s 超时 + 0.60m 漂移放弃保护 | 确认上层下发的终点是否带有机器狗姿态朝向约束需求？（详见 `GO2W_NAVIGATION_SYSTEM_GUIDE.md` §三.5） |
 
 ---
 

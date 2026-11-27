@@ -1,9 +1,14 @@
-"""Regression test for the B-button / motion-gate pause path.
+"""Regression test for the B-button / motion-gate emergency-stop path.
 
-Pressing B publishes /motion_enabled=False. The controller must brake, latch
-the pause and keep the node alive; pressing A must resume. This path used to
-call PathSegmentTracker.has_path(), which was missing and raised AttributeError
-inside the callback (the node then shut down).
+Pressing B publishes /motion_enabled=False. The controller must brake and
+latch the pause, but the task state must stay RUNNING (the mission is still in
+progress, the dog is only emergency-stopped) and it must never be reported as
+FAILED. Pressing A clears the latch and re-arms the 4.0 s stall window, so a
+robot that still cannot move after A is then correctly reported as FAILED.
+
+This path used to call PathSegmentTracker.has_path(), which was missing and
+raised AttributeError inside the callback (the node then shut down), and later
+used to force STOPPED on every B press.
 """
 
 import os
@@ -53,6 +58,7 @@ class _Node:
         node.is_abort_goal = False
         node.goal_reached_latched = False
         node.robot_odom_time = 1.0
+        node.blocked_timeout = 4.0
         node.path_tracker = PathSegmentTracker()
         node.blocked_detector = BlockedDetector()
         node.set_state = self._set_state
@@ -76,26 +82,39 @@ class _Node:
         NavigationPolicyNode.motion_enable_callback(self.node, Bool(data=True))
 
 
-def test_b_disable_brakes_and_keeps_node_alive_no_path():
-    h = _Node()
-    h.disable_motion()
-    assert h.node.state == NavState.STOPPED
-    assert h.node.user_pause_latched is True
-    assert h.node.stop_calls >= 1
-
-    h.enable_motion()
-    assert h.node.state == NavState.IDLE
-    assert h.node.user_pause_latched is False
-
-
-def test_b_disable_then_a_resumes_with_active_path():
+def test_b_disable_keeps_running_with_active_path():
+    """B is an emergency stop of the chassis, not a task abort: stay RUNNING."""
     h = _Node()
     h.node.path_tracker.set_path([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]], frame_id='world')
     h.disable_motion()
-    assert h.node.state == NavState.STOPPED
+    assert h.node.state == NavState.RUNNING
+    assert h.node.user_pause_latched is True
+    assert h.node.stop_calls >= 1
     assert h.node.path_tracker.has_path() is True
 
     h.enable_motion()
     assert h.node.state == NavState.RUNNING
     assert h.node.user_pause_latched is False
     assert h.node.path_tracker.current_progress >= 0.0
+
+
+def test_b_disable_on_idle_stays_idle():
+    """With no task in progress B must not fabricate a RUNNING state."""
+    h = _Node()
+    h.node.state = NavState.IDLE
+    h.disable_motion()
+    assert h.node.state == NavState.IDLE
+    assert h.node.user_pause_latched is True
+
+    h.enable_motion()
+    assert h.node.state == NavState.IDLE
+    assert h.node.user_pause_latched is False
+
+
+def test_b_disable_from_failed_does_not_enter_stopped():
+    """B never rewrites the state: an existing FAILED simply stays FAILED."""
+    h = _Node()
+    h.node.state = NavState.FAILED
+    h.disable_motion()
+    assert h.node.state == NavState.FAILED
+    assert h.node.user_pause_latched is True

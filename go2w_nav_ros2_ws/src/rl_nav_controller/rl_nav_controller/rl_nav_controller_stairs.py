@@ -131,9 +131,9 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
         #   距离 <= enter_dist 才允许转身；转身过程中距离 > abort_dist（扣除纯旋转引起的
         #   里程计位置漂移后）就放弃转身、直接完成目标。
         if not self.has_parameter('terminal_align_enter_dist'):
-            self.declare_parameter('terminal_align_enter_dist', 0.20)
+            self.declare_parameter('terminal_align_enter_dist', 0.50)
         if not self.has_parameter('terminal_align_abort_dist'):
-            self.declare_parameter('terminal_align_abort_dist', 0.40)
+            self.declare_parameter('terminal_align_abort_dist', 0.60)
         # 纯原地旋转时，里程计原点（约在头部/IMU）绕机体中心画弧，报告位置会平移
         #   2 * lever_arm * |sin(dpsi/2)|。这个量不是真实位移，判定 drift 时要扣掉。
         if not self.has_parameter('terminal_align_lever_arm'):
@@ -342,6 +342,16 @@ class StairsNavigationPolicyNode(NavigationPolicyNode):
                 f'Smart joystick mode active - Goal: [{self.smart_joystick_goal[0]:.2f}, '
                 f'{self.smart_joystick_goal[1]:.2f}, {self.smart_joystick_goal[2]:.2f}]'
             )
+
+        # 0) Chassis motion gate closed (B / external motion disable). The task
+        #    stays RUNNING, but the robot must not be driven: brake every cycle
+        #    and keep the stall window fresh so an emergency stop can never be
+        #    reported as FAILED. After A the normal 4.0 s stall rule resumes.
+        if not getattr(self, 'chassis_motion_enabled', True):
+            self._stop_robot()
+            if self.state == NavState.RUNNING and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+            return
 
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):

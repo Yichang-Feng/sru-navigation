@@ -242,6 +242,7 @@ def test_absolute_goal_leaves_vln_mode():
 
 
 def test_manual_pause_is_not_overridden_by_stream():
+    """A mission pause stays STOPPED; a B emergency stop stays RUNNING."""
     node = make_node()
     node.user_pause_latched = True
     node.state = NavState.STOPPED
@@ -249,6 +250,13 @@ def test_manual_pause_is_not_overridden_by_stream():
     assert node.state == NavState.STOPPED
     assert node.target_pos_w is not None
 
+    # B-style emergency stop: the gate is closed but the task stays RUNNING,
+    # the stream only refreshes the target.
+    node.state = NavState.RUNNING
+    node._handle_base_frame_goal(pose_msg('base_link', 1.0, 0.0, 0.0))
+    assert node.state == NavState.RUNNING
+
+    # A clears the latch; the following VLN goals keep the mission RUNNING.
     node.user_pause_latched = False
     node._handle_base_frame_goal(pose_msg('base_link', 1.0, 0.0, 0.0))
     assert node.state == NavState.RUNNING

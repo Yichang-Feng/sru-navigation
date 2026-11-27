@@ -322,7 +322,7 @@ class AdaptivePathSegmentTracker(PathSegmentTracker):
         self,
         logger=None,
         lookahead_min=0.5,
-        lookahead_max=1.0,
+        lookahead_max=2.0,
         window_dist=1.6,
         turn_angle_low_deg=20.0,
         turn_angle_high_deg=50.0,

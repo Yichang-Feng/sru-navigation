@@ -47,7 +47,7 @@ def generate_launch_description():
     odom_topic_arg = DeclareLaunchArgument('odom_topic', default_value='/lio/robo/odom', description='Robot odometry topic')
     odom_topic = LaunchConfiguration('odom_topic')
 
-    auto_unlock_bridge_arg = DeclareLaunchArgument('auto_unlock_bridge', default_value='true', description='Auto unlock chassis bridge')
+    auto_unlock_bridge_arg = DeclareLaunchArgument('auto_unlock_bridge', default_value='true', description='Set /startNavi after first odom (does NOT open /motion_enabled; START/A required)')
     auto_unlock_bridge = LaunchConfiguration('auto_unlock_bridge')
 
     report_failure_arg = DeclareLaunchArgument('report_failure', default_value='true', description='Whether to report and transition to error/failed state')
@@ -78,7 +78,7 @@ def generate_launch_description():
     lookahead_min_arg = DeclareLaunchArgument('lookahead_min', default_value='0.5', description='Minimum lookahead distance (m)')
     lookahead_min = LaunchConfiguration('lookahead_min')
 
-    lookahead_max_arg = DeclareLaunchArgument('lookahead_max', default_value='1.0', description='Maximum lookahead distance (m)')
+    lookahead_max_arg = DeclareLaunchArgument('lookahead_max', default_value='2.0', description='Maximum lookahead distance (m)')
     lookahead_max = LaunchConfiguration('lookahead_max')
 
     window_dist_arg = DeclareLaunchArgument('adaptive_window_dist', default_value='1.5', description='Curvature lookahead window distance (m)')

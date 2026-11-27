@@ -396,11 +396,11 @@ class NavigationPolicyNode(Node):
         self.declare_parameter('odom_topic', getattr(constants, 'DEFAULT_ODOM_TOPIC', '/lio/robo/odom'))
         self.declare_parameter('cmd_vel_topic', getattr(constants, 'DEFAULT_CMD_VEL_TOPIC', '/cmd_vel'))
         self.declare_parameter('auto_unlock_bridge', True)
-        self.declare_parameter('lookahead_distance', getattr(constants, 'LOOKAHEAD_DISTANCE', 1.0))
+        self.declare_parameter('lookahead_distance', getattr(constants, 'LOOKAHEAD_DISTANCE', 2.0))
         self.declare_parameter('enable_adaptive_lookahead', True)
         self.declare_parameter('adaptive_mode', 'both')
         self.declare_parameter('lookahead_min', 0.4)
-        self.declare_parameter('lookahead_max', 1.0)
+        self.declare_parameter('lookahead_max', 2.0)
         self.declare_parameter('adaptive_window_dist', 1.6)
         self.declare_parameter('turn_angle_low_deg', 20.0)
         self.declare_parameter('turn_angle_high_deg', 50.0)
@@ -699,10 +699,11 @@ class NavigationPolicyNode(Node):
         self.goal_is_relative = False   # True while following base-frame (VLN) goals
         self.last_goal_rx_time = None   # wall-clock time of the latest base-frame goal
         self.user_pause_latched = False  # True after B / motion-disable / mission pause
-        # Last /motion_enabled value (True = chassis gate open). While the gate is
-        # closed the robot physically cannot move, so a "no progress" window is not
-        # a blockage and must never be reported as FAILED.
-        self.chassis_motion_enabled = True
+        # /motion_enabled gate state. The node does not open this gate at
+        # startup, so assume closed until an explicit enable arrives. While the
+        # gate is closed the robot physically cannot move, so a "no progress"
+        # window is not a blockage and must never be reported as FAILED.
+        self.chassis_motion_enabled = False
 
         # Joystick state
         self.joy_linear_x = 0.0
@@ -802,11 +803,14 @@ class NavigationPolicyNode(Node):
         # 7) Compute projected gravity vector in base frame
         self.gravity_vector = self.projected_gravity_vector(self.robot_orientation_w)
 
-        # 8) Mark that odom is now available and auto unlock bridge
+        # 8) Mark that odom is now available and set the navigation gate.
+        #    /motion_enabled is deliberately NOT opened here: the platform may
+        #    not be ready to move at startup. The motion gate opens only on an
+        #    explicit START/A press (or an external /motion_enabled=True).
         if not self.odom_ready:
             self.odom_ready = True
             if self.auto_unlock_bridge and not self.chassis_unlocked:
-                self.unlock_chassis()
+                self.unlock_chassis(open_motion_gate=False)
 
         if odom_msg.header.frame_id == 'map':
             self.robot_pos_map = list(self.robot_pos_w)
@@ -867,8 +871,13 @@ class NavigationPolicyNode(Node):
             self.get_logger().warn(f'adaptive_debug publish failed: {exc}',
                                    throttle_duration_sec=5.0)
 
-    def unlock_chassis(self):
-        """Auto unlock chassis gate by publishing True to /motion_enabled and /startNavi."""
+    def unlock_chassis(self, open_motion_gate=True):
+        """Set the navigation gate; open the motion gate only when asked to.
+
+        Startup calls this with ``open_motion_gate=False`` so only
+        ``/startNavi`` is set: the platform may not be ready to move yet, and
+        ``/motion_enabled`` must come from an explicit START/A press.
+        """
         if getattr(self, 'user_pause_latched', False):
             # Never let the auto-unlock publish undo a manual pause (B): its own
             # /motion_enabled=True would otherwise come back to this node and
@@ -881,9 +890,15 @@ class NavigationPolicyNode(Node):
         msg.data = True
         if hasattr(self, 'start_navi_publisher') and self.start_navi_publisher is not None:
             self.start_navi_publisher.publish(msg)
+        self.chassis_unlocked = True
+        if not open_motion_gate:
+            self.get_logger().info(
+                '\033[92m' + f'[Auto-Unlock] {self.start_navi_topic} set True; '
+                f'{self.motion_enable_topic} left to START/A.\033[0m'
+            )
+            return
         if hasattr(self, 'motion_enable_publisher') and self.motion_enable_publisher is not None:
             self.motion_enable_publisher.publish(msg)
-        self.chassis_unlocked = True
         self.chassis_motion_enabled = True
         self.get_logger().info(
             '\033[92m' + f'[Auto-Unlock] Chassis gate unlocked: published {self.motion_enable_topic} & {self.start_navi_topic} = True' + '\033[0m'
@@ -912,12 +927,19 @@ class NavigationPolicyNode(Node):
         """Handle chassis motion enable/disable events from /motion_enabled.
 
         Triggered when:
-        1. Unitree wireless remote controller button B is pressed -> msg.data = False (stop/pause)
-        2. Unitree wireless remote controller button A is pressed -> msg.data = True (start/resume)
+        1. Unitree wireless remote controller button B is pressed -> msg.data = False (emergency stop)
+        2. Unitree wireless remote controller button A is pressed -> msg.data = True (resume motion)
         3. External safety monitor or bridge toggles motion enable.
+
+        B only emergency-stops the chassis; it does not abort the task. The
+        state therefore deliberately stays RUNNING (the platform keeps
+        reporting ``running`` because the mission is still in progress) and the
+        stall detector is kept fresh while the gate is closed, so an emergency
+        stop can never be reported as FAILED. A re-opens the gate and restarts
+        the 4.0 s stall window: only if the robot still makes no progress after
+        A does the normal ``failed`` verdict apply.
         """
         enabled = bool(msg.data)
-        was_enabled = bool(getattr(self, 'chassis_motion_enabled', True))
         self.chassis_motion_enabled = enabled
         now = time.monotonic()
         # A duplicate is the same A press delivered twice (two bridges) or a
@@ -932,47 +954,71 @@ class NavigationPolicyNode(Node):
 
         if not enabled:
             self.user_pause_latched = True
-            # Motion disabled (e.g. Unitree controller button B pressed): Transition to STOPPED
-            if self.state in (NavState.RUNNING, NavState.IDLE, NavState.FAILED):
+            self.is_abort_goal = False
+            # B = chassis emergency stop, not a task abort: brake, retain the
+            # path, and keep the reported state (RUNNING while a task is in
+            # progress). The control loop resets the stall window every cycle
+            # while the gate is closed, so this can never trip FAILED.
+            self._stop_robot()
+            if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+            self.get_logger().warn(
+                '\033[93m[MotionGate] Chassis motion disabled by remote B: emergency stop '
+                f'(cmd_vel=0, path retained in memory); state stays {self.state.value} and '
+                'will never be reported as FAILED. Press A to resume.\033[0m'
+            )
+            return
+
+        # A duplicate True must never undo an explicit pause: it would clear
+        # the latch while the chassis gate is still closed.
+        if self.state == NavState.STOPPED and self.user_pause_latched and duplicate_true:
+            self.get_logger().info(
+                '\033[93m[MotionGate] Duplicate /motion_enabled=True while paused: ignored '
+                '(only a fresh A press resumes).\033[0m'
+            )
+            return
+        if self.state == NavState.STOPPED:
+            # STOPPED is only reached through an explicit /mission/control
+            # pause now; A resumes it exactly as before.
+            self.user_pause_latched = False
+            if hasattr(self, 'path_tracker') and self.path_tracker.has_path():
                 self.is_abort_goal = False
-                self.set_state(NavState.STOPPED, reason="Chassis motion disabled by remote B button (/motion_enabled=False)")
-                self._stop_robot()
-                if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.goal_reached_latched = False
+                tracking_frame = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
+                pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
+                pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+                if pos_check is not None:
+                    self.path_tracker.realign_to_robot(pos_check[:2])
+                if hasattr(self, 'blocked_detector'):
                     self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
-                self.get_logger().warn(
-                    '\033[93m[MotionGate] Chassis motion disabled: State set to STOPPED (cmd_vel=0, path retained in memory).\033[0m'
-                )
-        else:
-            # A duplicate True must never undo a paused robot: that would return
-            # it to RUNNING while the chassis gate is still closed, and its 4 s
-            # stall window would then report a spurious FAILED.
-            if self.state == NavState.STOPPED and self.user_pause_latched and duplicate_true:
+                self.set_state(NavState.RUNNING, reason="Chassis motion resumed by remote A button (/motion_enabled=True)")
                 self.get_logger().info(
-                    '\033[93m[MotionGate] Duplicate /motion_enabled=True while paused: ignored '
-                    '(only a fresh A press resumes).\033[0m'
+                    '\033[92m[MotionGate] Chassis motion enabled: Resumed path tracking -> RUNNING!\033[0m'
                 )
-                return
-            if self.state == NavState.STOPPED:
-                self.user_pause_latched = False
-                if hasattr(self, 'path_tracker') and self.path_tracker.has_path():
-                    self.is_abort_goal = False
-                    self.goal_reached_latched = False
-                    tracking_frame = getattr(self.path_tracker, 'frame_id', 'map') if hasattr(self, 'path_tracker') else 'map'
-                    pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
-                    pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
-                    if pos_check is not None:
-                        self.path_tracker.realign_to_robot(pos_check[:2])
-                    if hasattr(self, 'blocked_detector'):
-                        self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
-                    self.set_state(NavState.RUNNING, reason="Chassis motion resumed by remote A button (/motion_enabled=True)")
-                    self.get_logger().info(
-                        '\033[92m[MotionGate] Chassis motion enabled: Resumed path tracking -> RUNNING!\033[0m'
-                    )
-                else:
-                    self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path -> IDLE")
-            elif not was_enabled:
-                # Fresh A edge in any other state: it clears the pause intent.
-                self.user_pause_latched = False
+            else:
+                self.set_state(NavState.IDLE, reason="Chassis motion enabled with no active path -> IDLE")
+        else:
+            # Fresh A edge in any other state (typically the B emergency stop
+            # left us in RUNNING): clear the pause intent and restart the stall
+            # window so the 4.0 s "no movement -> FAILED" rule starts from A.
+            self.user_pause_latched = False
+            if self.state == NavState.RUNNING and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                tracking_frame = getattr(self.path_tracker, 'frame_id', 'map')
+                pos_in_frame, _ = self.get_robot_pose_in_frame(tracking_frame) if hasattr(self, 'get_robot_pose_in_frame') else (None, None)
+                pos_check = pos_in_frame if pos_in_frame is not None else self.robot_pos_w
+                if pos_check is not None:
+                    self.path_tracker.realign_to_robot(pos_check[:2])
+                if hasattr(self, 'blocked_detector'):
+                    self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+                self.get_logger().info(
+                    '\033[92m[MotionGate] Chassis motion enabled by remote A: robot resumes RUNNING '
+                    f'(stall watchdog re-armed, {self.blocked_timeout:.1f}s without motion -> FAILED).\033[0m'
+                )
+            else:
+                self.get_logger().info(
+                    f'[MotionGate] Chassis motion enabled by remote A: pause latch cleared '
+                    f'(state stays {self.state.value}).'
+                )
 
     def set_state(self, new_state: NavState, reason: str = "", error_msg: str = ""):
         """Transition navigation state and trigger immediate event-driven status dispatch."""
@@ -984,6 +1030,16 @@ class NavigationPolicyNode(Node):
                 '\033[91m[NavState] Refused illegal transition stopped -> failed'
                 + (f' ({reason})' if reason else '')
                 + '. STOPPED can only be resumed explicitly (A / resume).\033[0m'
+            )
+            return
+        # While the chassis motion gate is closed (B / external motion
+        # disable) the robot is not allowed to move, so a stalled-task verdict
+        # would be false: keep the state untouched until A re-opens the gate.
+        if new_state == NavState.FAILED and not getattr(self, 'chassis_motion_enabled', True):
+            self.get_logger().warn(
+                '\033[93m[NavState] Ignored failed while chassis motion is disabled by B'
+                + (f' ({reason})' if reason else '')
+                + '. The task stays in its current state; press A to resume.\033[0m'
             )
             return
         if self.state != new_state or (new_state == NavState.ERROR and error_msg != self.error_msg):
@@ -1399,16 +1455,12 @@ class NavigationPolicyNode(Node):
         self.path_tracker.set_path(pts, terminal_yaw=terminal_yaw, frame_id=frame_id if frame_id else 'map')
         self.blocked_detector.reset(self.robot_odom_time, progress_s=0.0)
 
-        # 5) State transition to RUNNING (unless a manual pause is latched)
-        #    A latched pause (B / motion gate / mission pause) means the chassis
-        #    gate is still closed: auto-running here would only feed the stall
-        #    detector and report a spurious `failed` 4 s later.
-        if self.state == NavState.STOPPED or self.user_pause_latched:
-            if self.state != NavState.STOPPED:
-                self.set_state(
-                    NavState.STOPPED,
-                    reason="New path received while the manual pause is latched"
-                )
+        # 5) State transition to RUNNING.
+        #    An explicit /mission/control pause (STOPPED) keeps the path
+        #    retained until "resume". A B emergency stop keeps the task state
+        #    RUNNING: the new path is retained, but the robot stays braked and
+        #    cannot trip the stall detector while the chassis gate is closed.
+        if self.state == NavState.STOPPED:
             self._stop_robot()
             self.get_logger().info(
                 '\033[93m' +
@@ -1421,12 +1473,21 @@ class NavigationPolicyNode(Node):
                 NavState.RUNNING,
                 reason=f"New path segment loaded ({len(pts)} points, {self.path_tracker.total_length:.2f}m)"
             )
-            self.get_logger().info(
-                '\033[92m' +
-                f'Received new path segment: {len(pts)} points, total_length={self.path_tracker.total_length:.2f}m, ' +
-                f'start=[{pts[0][0]:.2f}, {pts[0][1]:.2f}], terminal=[{pts[-1][0]:.2f}, {pts[-1][1]:.2f}]' +
-                '\033[0m'
-            )
+            if self.user_pause_latched:
+                self._stop_robot()
+                self.get_logger().info(
+                    '\033[93m' +
+                    f'Received new path segment ({len(pts)} points, {self.path_tracker.total_length:.2f}m) while the '
+                    'chassis motion gate is closed by B: state stays RUNNING, robot braked until A.' +
+                    '\033[0m'
+                )
+            else:
+                self.get_logger().info(
+                    '\033[92m' +
+                    f'Received new path segment: {len(pts)} points, total_length={self.path_tracker.total_length:.2f}m, ' +
+                    f'start=[{pts[0][0]:.2f}, {pts[0][1]:.2f}], terminal=[{pts[-1][0]:.2f}, {pts[-1][1]:.2f}]' +
+                    '\033[0m'
+                )
 
     def depth_callback(self, depth_msg: Image):
         """Process depth image and trigger policy execution.
@@ -1510,6 +1571,16 @@ class NavigationPolicyNode(Node):
                 f'Smart joystick mode active - Goal: [{self.smart_joystick_goal[0]:.2f}, '
                 f'{self.smart_joystick_goal[1]:.2f}, {self.smart_joystick_goal[2]:.2f}]'
             )
+
+        # 0) Chassis motion gate closed (B / external motion disable). The task
+        #    stays RUNNING, but the robot must not be driven: brake every cycle
+        #    and keep the stall window fresh so an emergency stop can never be
+        #    reported as FAILED. After A the normal 4.0 s stall rule resumes.
+        if not getattr(self, 'chassis_motion_enabled', True):
+            self._stop_robot()
+            if self.state == NavState.RUNNING and hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker') and self.path_tracker.has_path():
+                self.blocked_detector.reset(self.robot_odom_time, self.path_tracker.current_progress)
+            return
 
         # 1) Check blocked / stopped / error states
         if self.state in (NavState.ERROR, NavState.FAILED, NavState.STOPPED):
@@ -1830,11 +1901,10 @@ class NavigationPolicyNode(Node):
         btn_start = getattr(constants, 'BUTTON_START', 0)  # Button A (启动/恢复)
         btn_abort = getattr(constants, 'BUTTON_ABORT', 1)
 
-        # 1. 按钮 B (Pause / Stop): 暂停导航并即时刹停 (保持当前路径不清除)
+        # 1. 按钮 B (Pause / Stop): 急停并即时刹停，任务状态保持不变 (保持 running)，路径不清除
         if (len(joy_msg.buttons) > btn_pause and joy_msg.buttons[btn_pause] == 1) or \
            (len(joy_msg.buttons) > btn_abort and joy_msg.buttons[btn_abort] == 1):
             self.is_abort_goal = False
-            self.set_state(NavState.STOPPED, reason="Joystick B button (Pause/Stop) pressed")
             self.user_pause_latched = True
             self._stop_robot()
             if hasattr(self, 'blocked_detector') and hasattr(self, 'path_tracker'):
@@ -1843,7 +1913,8 @@ class NavigationPolicyNode(Node):
                     self.path_tracker.current_progress if self.path_tracker.has_path() else 0.0
                 )
             self.get_logger().warn(
-                '\033[93m[Joystick] Button B pressed: Navigation PAUSED/STOPPED (Robot actively braked, cmd_vel=0, path retained).\033[0m'
+                '\033[93m[Joystick] Button B pressed: Chassis EMERGENCY STOP (cmd_vel=0, path retained). '
+                f'State stays {self.state.value} (never FAILED); press A to resume.\033[0m'
             )
 
         dx, dy, dz = self._moving_xyz_with_buttons(joy_msg, scale=constants.MOVING_SCALE)
@@ -2257,16 +2328,20 @@ class NavigationPolicyNode(Node):
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
-        if self.user_pause_latched:
-            # A manual stop (B / motion disable / mission pause) must not be
-            # overridden by the next goal of a continuously publishing VLN.
+        if self.state == NavState.STOPPED:
+            # Explicit /mission/control pause: the continuously publishing VLN
+            # stream must not override it.
             self.get_logger().info(
-                'VLN goal updated, but the robot stays STOPPED (manual pause latched). '
+                'VLN goal updated, but the robot stays STOPPED (mission pause). '
                 'Press A / resume to continue.',
                 throttle_duration_sec=2.0
             )
         else:
             self.set_state(NavState.RUNNING, reason="VLN base-frame goal received")
+            if self.user_pause_latched:
+                # B emergency stop: the mission stays RUNNING, but the chassis
+                # gate is closed so the robot must not drive until A.
+                self._stop_robot()
 
         robot_pos_str = f"[{self.robot_pos_w[0]:.2f}, {self.robot_pos_w[1]:.2f}, {self.robot_pos_w[2]:.2f}]"
         self.get_logger().info(
@@ -2351,24 +2426,28 @@ class NavigationPolicyNode(Node):
         self.heading_align_terminal_pos = None
         self.heading_align_start_time = None
         self.heading_align_stable_count = 0
-        if self.user_pause_latched:
-            # A manual pause (B / motion gate / mission pause) must not be
-            # overridden by a newly dispatched goal: the chassis gate is still
-            # closed, so starting RUNNING here would only feed the 4 s stall
-            # detector and report a spurious `failed`. Keep the goal latched
-            # and stay STOPPED until A / resume.
-            self.set_state(
-                NavState.STOPPED,
-                reason="Single goal received while the manual pause is latched"
-            )
+        if self.state == NavState.STOPPED:
+            # Explicit /mission/control pause: keep the goal latched and stay
+            # STOPPED until A / resume.
+            self._stop_robot()
             self.get_logger().info(
                 '\033[93m' +
-                'New target received, but the robot stays STOPPED (manual pause latched). '
+                'New target received, but the robot stays STOPPED (mission pause). '
                 'Press A / resume to continue.' +
                 '\033[0m'
             )
         else:
             self.set_state(NavState.RUNNING, reason="Single goal received")
+            if self.user_pause_latched:
+                # B emergency stop: the mission stays RUNNING, but the chassis
+                # gate is closed so the robot must not drive until A.
+                self._stop_robot()
+                self.get_logger().info(
+                    '\033[93m' +
+                    'New target received while the chassis motion gate is closed by B: '
+                    'state stays RUNNING, robot braked until A.' +
+                    '\033[0m'
+                )
         self.get_logger().info(
             '\033[92m' +
             f'Received new target position: [{self.target_pos_w[0]:.2f}, {self.target_pos_w[1]:.2f}, {self.target_pos_w[2]:.2f}], ' +
@@ -2452,14 +2531,14 @@ def main(args=None):
     parser.add_argument('--cmd-vel-topic', type=str, default=None, help='Velocity command topic name (default: /cmd_vel)')
     parser.add_argument('--motion-enable-topic', type=str, default=None, help='Chassis motion enable topic name (default: /motion_enabled)')
     parser.add_argument('--odom-topic', type=str, default=None, help='Robot odometry topic name (default: /lio/robo/odom)')
-    parser.add_argument('--lookahead-distance', type=float, default=None, help='Dynamic lookahead distance in meters (default: 1.0)')
+    parser.add_argument('--lookahead-distance', type=float, default=None, help='Dynamic lookahead distance in meters (default: 2.0)')
     parser.add_argument('--adaptive-lookahead', dest='enable_adaptive_lookahead', action='store_true', default=None, help='Enable dual-factor adaptive lookahead')
     parser.add_argument('--no-adaptive-lookahead', dest='enable_adaptive_lookahead', action='store_false', help='Disable adaptive lookahead (use fixed lookahead)')
     parser.add_argument('--adaptive-mode', type=str, default=None, choices=['both', 'curvature_only', 'clearance_only', 'none', 'curv', 'door'], help='Adaptive mode: both, curvature_only (turns only), clearance_only (doors only), none')
     parser.add_argument('--curv-only', '--curvature-only', dest='adaptive_mode', action='store_const', const='curvature_only', help='Convenience alias: only path curvature turning adaptation')
     parser.add_argument('--door-only', '--clearance-only', dest='adaptive_mode', action='store_const', const='clearance_only', help='Convenience alias: only visual narrow passage adaptation')
     parser.add_argument('--lookahead-min', type=float, default=None, help='Minimum lookahead distance (default: 0.5m)')
-    parser.add_argument('--lookahead-max', type=float, default=None, help='Maximum lookahead distance (default: 1.0m)')
+    parser.add_argument('--lookahead-max', type=float, default=None, help='Maximum lookahead distance (default: 2.0m)')
     parser.add_argument('--door-speed-boost', type=float, default=None, help='Minimum forward speed boost inside doors (default: 0.35m/s)')
     parser.add_argument('--report-failure', dest='report_failure', action='store_true', default=None, help='Enable reporting FAILED/ERROR states (default: True)')
     parser.add_argument('--no-report-failure', dest='report_failure', action='store_false', help='Disable reporting FAILED/ERROR states')

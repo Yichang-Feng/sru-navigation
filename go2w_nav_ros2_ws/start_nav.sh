@@ -33,7 +33,7 @@ CAMERA_TYPE="realsense"         # 相机选择: "realsense" (默认, Intel RealS
 ENABLE_ADAPTIVE="true"
 ADAPTIVE_MODE="curvature_only"  # 默认使用 curvature_only，避免窄走廊双侧墙壁被视觉误判为窄门导致前瞻锁死在 0.5m
 LOOKAHEAD_MIN="0.4"
-LOOKAHEAD_MAX="1.0"
+LOOKAHEAD_MAX="2.0"
 WINDOW_DIST="1.6"
 TURN_ANGLE_LOW="20.0"   # 曲率自适应下阈值 (deg)：小于它认为是直道
 TURN_ANGLE_HIGH="50.0"  # 曲率自适应上阈值 (deg)：大于它前瞻直接收到 lookahead_min
@@ -42,8 +42,8 @@ CORNER_THRESH="25.0"    # corner_dist: 路径航向偏离该角度即视为"拐�
 CORNER_MARGIN="0.25"    # corner_dist: 在拐角前多少米开始收缩前瞻 (m)
 SLEW_INC="0.8"          # 前瞻恢复速率 (m/s)：决定出弯/出窄门后多快回到长前瞻
 SLEW_DEC="2.5"          # 前瞻收缩速率 (m/s)
-ALIGN_ENTER="0.20"      # 到点转身：距离 <= 该值才允许转身
-ALIGN_ABORT="0.40"      # 到点转身：距离 > 该值（扣除纯旋转漂移后）则放弃转身
+ALIGN_ENTER="0.50"      # 到点转身：距离 <= 该值才允许转身
+ALIGN_ABORT="0.60"      # 到点转身：距离 > 该值（扣除纯旋转漂移后）则放弃转身
 ALIGN_LEVER="0.55"      # 到点转身：里程计原点相对旋转中心的杠杆臂 (m)，用于扣除原地旋转的位置漂移
 DOOR_SPEED_BOOST="0.0"
 REPORT_FAILURE="true"           # 默认启用停滞报错上报 (标准状态机)
@@ -91,8 +91,8 @@ show_help() {
     echo "  --corner-margin <距离> corner_dist: 拐角前多少米开始收缩前瞻 (默认 0.25m)"
     echo "  --slew-inc <速率>     前瞻恢复速率 m/s (默认 0.8, 出弯恢复快慢的关键)"
     echo "  --slew-dec <速率>     前瞻收缩速率 m/s (默认 2.5)"
-    echo "  --align-enter <距离>  到点转身进入距离 (默认 0.20m, 需 --arrive-thresh <= 此值)"
-    echo "  --align-abort <距离>  到点转身放弃距离 (默认 0.40m, 已扣除原地旋转漂移)"
+    echo "  --align-enter <距离>  到点转身进入距离 (默认 0.50m, 需 --arrive-thresh <= 此值)"
+    echo "  --align-abort <距离>  到点转身放弃距离 (默认 0.60m, 已扣除原地旋转漂移)"
     echo "  --align-lever <距离>  里程计杠杆臂 (默认 0.55m, 原地旋转位置漂移补偿)"
     echo "  --arrive-thresh <距离> 终端目标到达判定距离阈值 (默认 0.45m)"
     echo "  --heading-align     开启终端航向对齐 (默认开启)"

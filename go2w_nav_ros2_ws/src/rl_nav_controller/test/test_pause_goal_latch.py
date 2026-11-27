@@ -1,17 +1,19 @@
-"""Regression test for "B pause, then dispatch a new goal/path, don't press A".
+"""Regression tests for the B-button emergency stop vs. a mission pause.
 
-Reported symptom: after pressing B (pause) the operator re-issues a goal; if A
-is not pressed immediately the controller reported ``{"state":"failed"}`` a few
-seconds later, even though the robot was only waiting for A.
+Rule pinned here:
 
-Root cause: both the single-goal handler (``target_position_callback``, fed by
-``/goal_3d`` / ``/goal_pose`` / ``/cur_goal``) and ``global_path_callback``
-unconditionally resumed ``RUNNING``. The chassis gate is still closed until A,
-so the robot could not move and the 4 s blocked detector tripped into FAILED.
+* B (``/motion_enabled=False``) is a chassis emergency stop, not a task abort.
+  The state stays RUNNING and the reported status stays ``running``; the path
+  or goal is retained and the robot is braked. It must never become ``stopped``
+  and must never become ``failed`` while the gate is closed.
+* A (``/motion_enabled=True``) clears the pause latch and re-arms the 4.0 s
+  stall window. Only a robot that still makes no progress for 4.0 s after A is
+  reported as ``failed``.
+* An explicit ``/mission/control: "pause"`` is still the only producer of the
+  ``stopped`` state, and only ``resume``/A leaves it.
 
-These tests pin the rule: a latched manual pause (B / motion gate / mission
-pause) must survive a newly dispatched goal or path, and only A / resume may
-clear it.
+Historically both B and a new goal/path used to force STOPPED, and goals sent
+while paused were dropped; the tests below keep the corrected contract.
 """
 
 import os
@@ -94,6 +96,7 @@ class _Node:
         node.report_failure = True
         node.last_depth_time = None
         node.camera_timeout = 3.0
+        node.blocked_timeout = 4.0
         node.stop_calls = 0
 
         node.get_robot_pose_in_frame = lambda frame='map': (
@@ -160,12 +163,16 @@ def test_path_while_paused_stays_stopped_and_is_retained():
     assert h.node.stop_calls >= 1
 
 
-def test_path_while_failed_but_pause_latched_holds_stop():
-    """Even if the node had tripped to FAILED, a latched pause wins over auto-run."""
+def test_path_while_failed_but_pause_latched_keeps_running():
+    """A latched B emergency stop plus a fresh path keeps the mission RUNNING.
+
+    The gate is closed so the robot cannot move, but the task is in progress:
+    state must be RUNNING (never STOPPED, never FAILED).
+    """
     h = _Node(paused=True)
     h.node.state = NavState.FAILED
     h.send_path()
-    assert h.node.state == NavState.STOPPED
+    assert h.node.state == NavState.RUNNING
     assert h.node.path_tracker.has_path() is True
 
 
@@ -260,3 +267,71 @@ def test_stall_detector_is_inert_while_gate_closed():
             h.node.set_state(NavState.FAILED, reason='Stalled: simulated')
             break
     assert h.node.state == NavState.FAILED
+
+
+def test_b_keeps_running_and_new_path_keeps_running():
+    """B while RUNNING stays RUNNING, and a path dispatched while latched keeps it."""
+    from std_msgs.msg import Bool
+
+    h = _Node()
+    h.node.state = NavState.RUNNING
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=False))
+    assert h.node.state == NavState.RUNNING
+    assert h.node.user_pause_latched is True
+    assert h.node.chassis_motion_enabled is False
+
+    h.send_path()
+    assert h.node.state == NavState.RUNNING
+    assert h.node.path_tracker.has_path() is True
+
+
+def test_a_after_b_reports_failed_only_after_4s_without_motion():
+    """B never trips FAILED; A restarts the 4.0 s window, then stillness fails."""
+    from std_msgs.msg import Bool
+
+    h = _Node()
+    h.node.state = NavState.RUNNING
+    h.send_path()
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=False))
+    assert h.node.state == NavState.RUNNING
+
+    t = 1.0
+
+    def loop(seconds):
+        nonlocal t
+        for _ in range(int(round(seconds / 0.1))):
+            t += 0.1
+            if not h.node.chassis_motion_enabled:
+                # Same guard as generate_cmd_vel while the gate is closed.
+                h.node.blocked_detector.reset(t, 0.0)
+            elif h.node.blocked_detector.update(t, 0.0, (0.0, 0.0)):
+                NavigationPolicyNode.set_state(h.node, NavState.FAILED, reason='Stalled: simulated')
+
+    # 10 s of B: the emergency stop must never be reported as failed.
+    loop(10.0)
+    assert h.node.state == NavState.RUNNING
+
+    # A re-opens the gate and starts a clean 4.0 s window.
+    h.node.robot_odom_time = t
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=True))
+    assert h.node.state == NavState.RUNNING
+    assert h.node.user_pause_latched is False
+    assert h.node.chassis_motion_enabled is True
+
+    # 3.9 s without motion is still RUNNING...
+    loop(3.9)
+    assert h.node.state == NavState.RUNNING
+    # ...and only after the 4.0 s threshold does it become FAILED.
+    loop(0.5)
+    assert h.node.state == NavState.FAILED
+
+
+def test_failed_is_refused_while_gate_is_closed():
+    """Even a direct FAILED request is ignored during a B emergency stop."""
+    from std_msgs.msg import Bool
+
+    h = _Node()
+    h.node.state = NavState.RUNNING
+    NavigationPolicyNode.motion_enable_callback(h.node, Bool(data=False))
+    h.node.set_state(NavState.FAILED, reason='Stalled: simulated')
+    assert h.node.state == NavState.RUNNING
