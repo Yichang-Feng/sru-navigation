@@ -1,7 +1,15 @@
-# 部署参数总表（`go2w_nav_ros2_ws`，2026-11-19）
+# 部署参数总表（`go2w_nav_ros2_ws`，2026-11-19，2026-11-26 同步 sru-local）
 
 对应代码：`rl_nav_controller_stairs.py`（继承 `rl_nav_controller_adaptive.py`）+ `adaptive_path_tracker.py`
-入口脚本：`start_nav.sh`
+入口脚本：旧部署仓库 `start_nav.sh`；sru-local 起为 `sru_ws/start_global_sru.sh` / `sru_global.launch.py`
+
+> **2026-11-26 同步 sru-local 启动参数**：以 `~/sru-local` 的 `sru_global.launch.py`、`config/global.yaml`、`rl_nav_controller_stairs.py` 与 [dev-local-sru](https://github.com/agile-nav/agile-nav.github.io/blob/main/draft/dev-local-sru.md) 为准，本次调整的默认值为：
+>
+> - `lookahead_distance` 1.0 → **2.0 m**，`lookahead_max` 1.0 → **2.0 m**（`constants.py`、adaptive tracker、各 launch 同步）；
+> - `segment_arrive_threshold` 0.20 → **0.45 m**；
+> - `terminal_align_enter_dist` 0.20 → **0.50 m**，`terminal_align_abort_dist` 0.40 → **0.60 m**。
+>
+> 下表“当前生效”列已按新默认值更新；来源标注中的“脚本”在 sru-local 下对应 launch/`config/global.yaml` 参数。
 
 ---
 
@@ -110,7 +118,7 @@ L(s)        = clamp(d_corner(s) - corner_switch_margin, lookahead_min, lookahead
 
 | 参数 | 当前生效 | 来源 | 作用 | 可测值 |
 |---|---:|---|---|---|
-| `segment_arrive_threshold` | 0.20 | 脚本 | **到点判定**：到终点的距离阈值。同时要求剩余弧长 ≤ max(0.40, 2×该值) | **必须 ≤ `terminal_align_enter_dist`** |
+| `segment_arrive_threshold` | **0.45** | 脚本 | **到点判定**：到终点的距离阈值。同时要求剩余弧长 ≤ max(0.40, 2×该值) | **必须 ≤ `terminal_align_enter_dist`（0.50）** |
 | `enable_terminal_heading_align` | `true` | 脚本 | 到点后是否原地转身对齐目标朝向 | true |
 | `terminal_heading_tol` | 0.26 rad ≈ 14.9° | 脚本 | 航向对齐容差 | 保持 |
 | `terminal_heading_kp` | 1.2 | 代码 | 对齐的 P 增益 | 保持 |
@@ -119,8 +127,8 @@ L(s)        = clamp(d_corner(s) - corner_switch_margin, lookahead_min, lookahead
 | `terminal_heading_max_vel` | 0.45 rad/s | 代码 | 最大角速度 | 0.45 |
 | `terminal_heading_timeout` | 5.0 s | 代码 | 转身超时看门狗 | 保持 |
 | `terminal_heading_stable_frames` | 2 | 代码 | 连续几帧进入容差才算收敛 | 保持 |
-| `terminal_align_enter_dist` | 0.20 | 脚本 | **新增**：距离 ≤ 它才允许进入转身 | 0.20 |
-| `terminal_align_abort_dist` | 0.40 | 脚本 | **新增**：转身中距离 > 它（扣除旋转漂移后）则放弃 | 0.40 |
+| `terminal_align_enter_dist` | **0.50** | 脚本 | 距离 ≤ 它才允许进入转身 | 0.50 |
+| `terminal_align_abort_dist` | **0.60** | 脚本 | 转身中距离 > 它（扣除旋转漂移后）则放弃 | 0.60 |
 | `terminal_align_lever_arm` | 0.55 | 脚本 | **新增**：里程计原点相对旋转中心的杠杆臂，用于扣除原地旋转造成的假位移 | 实测标定 |
 | ~~`terminal_heading_drift_tol`~~ | 0.40 | 代码 | **已失效**：新守卫改用 `terminal_align_abort_dist`，这个参数只被读取、不再参与判断 | 可删 |
 
@@ -211,7 +219,7 @@ L(s)        = clamp(d_corner(s) - corner_switch_margin, lookahead_min, lookahead
 | 参数 | 试值 | 说明 |
 |---|---|---|
 | `terminal_align_lever_arm` | 0.55 → 实测值 | 原地转 180° 标定 |
-| `terminal_align_enter_dist` | 0.20 | 要与 `--arrive-thresh` 配合，二者都要 ≤0.20 |
+| `terminal_align_enter_dist` | 0.50 | 要与 `--arrive-thresh` 配合，`segment_arrive_threshold`（0.45）需 ≤ 它 |
 
 ---
 
@@ -224,6 +232,6 @@ L(s)        = clamp(d_corner(s) - corner_switch_margin, lookahead_min, lookahead
 | `enable_stair_remapping = true` | 会造成策略输入分布漂移，偏航摆动显著增大（见 `DEPTH_FILL_MODE_STUTTER_ANALYSIS_20261117.md`） |
 | `turn_angle_high_deg` | 只影响"多久收到最短"，不是当前瓶颈；且 `corner_dist` 下已失效 |
 | `slew_rate_decrease` | 2.5 m/s 已经足够快，0.64 s 走完满程 |
-| `segment_arrive_threshold > 0.20` | 会让终点转身逻辑直接跳过 |
+| `segment_arrive_threshold > 0.50` | 超过 `terminal_align_enter_dist` 会让终点转身逻辑直接跳过 |
 
 > `switch_mode` 本身不是"不能动"，但**改回 `curvature` 时要把 `--min`、`--turn-low`、`--slew-inc` 一起看**：现场效果最好的组合是 `0.4 + corner_dist`，单独改一个往往会让另一处退化。

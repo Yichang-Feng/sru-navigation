@@ -48,12 +48,13 @@
 <body>
 <div class="wrap">
   <h1>Unitree Go2W 局部导航控制器 · 状态变化图 (当前对齐标准)</h1>
-  <div class="sub">由 <code>rl_nav_controller</code>（机载 RL 局部导航控制器）发布 · 状态机依据实时传感器、路径跟踪与指令事件判定</div>
+  <div class="sub">由 <code>rl_nav_controller</code>（机载 RL 局部导航控制器）发布 · 状态机依据实时传感器、路径跟踪与指令事件判定<br/>
+  <b style="color:#7ee0a8">手柄语义</b>：B（<code>/motion_enabled=False</code>）= 底盘急停，<b>状态保持 running、永不判 failed</b>；A（<code>/motion_enabled=True</code>）= 解除急停并重新计时，之后 4.0s 无位移才进入 failed。stopped 只由 <code>/mission/control: "pause"</code> 产生。</div>
 
   <div class="card">
     <h2>优先级与状态集合（6 状态体系，从高到低）</h2>
     <div class="prio">
-      <span class="pill"><i>1</i>stopped (停止/暂停)</span>
+      <span class="pill"><i>1</i>stopped (任务暂停 · 仅 pause 指令)</span>
       <span class="pill"><i>2</i>idle (空闲就绪)</span>
       <span class="pill"><i>3</i>goal_reached (本段到达)</span>
       <span class="pill"><i>4</i>failed (业务受阻死锁)</span>
@@ -84,7 +85,7 @@
 
       <!-- running -> goal_reached (arrival & terminal alignment) -->
       <path class="edge" marker-end="url(#arw)" d="M720,368 Q880,280 1050,172"></path>
-      <text class="lbl" x="900" y="244" text-anchor="middle">到达终点 (&lt; 0.20m)</text>
+      <text class="lbl" x="900" y="244" text-anchor="middle">到达终点 (&lt; 0.45m)</text>
       <text class="lbl" x="900" y="264" text-anchor="middle" font-size="11.5" fill="#93c5fd">且朝向对齐 / 漂移看门狗</text>
 
       <!-- goal_reached -> idle (immediate return, forming unidirectional triangle) -->
@@ -93,7 +94,8 @@
 
       <!-- running -> failed (obstacle stalled) -->
       <path class="edge" marker-end="url(#arw)" d="M590,452 L590,588"></path>
-      <text class="lbl" x="535" y="520" text-anchor="middle">停滞遇阻 ≥ 4.0s</text>
+      <text class="lbl" x="535" y="512" text-anchor="middle">停滞遇阻 ≥ 4.0s</text>
+      <text class="lbl" x="532" y="532" text-anchor="middle" font-size="11.5" fill="#93c5fd">B 急停期间不计时</text>
 
       <!-- failed -> running (replan / resume) -->
       <path class="edge" marker-end="url(#arw)" d="M650,588 L650,452"></path>
@@ -105,7 +107,7 @@
 
       <!-- stopped -> running -->
       <path class="edge" marker-end="url(#arw)" d="M300,614 Q410,520 520,412"></path>
-      <text class="lbl" x="410" y="508" text-anchor="middle">/mission/control: "resume"</text>
+      <text class="lbl" x="410" y="508" text-anchor="middle">"resume" / 手柄 A</text>
 
       <!-- ===== 节点 ===== -->
       <!-- IDLE -->
@@ -126,14 +128,14 @@
       <g class="node">
         <rect x="520" y="348" width="200" height="84" rx="16" fill="var(--running)" stroke="#4ade80" stroke-width="2.2"></rect>
         <text class="nm" x="620" y="386">running</text>
-        <text class="fr" x="620" y="410">自主避障推进 · 1Hz</text>
+        <text class="fr" x="620" y="410">自主避障推进 · B 急停仍 running</text>
       </g>
 
       <!-- STOPPED -->
       <g class="node">
         <rect x="100" y="588" width="200" height="84" rx="16" fill="var(--stopped)" stroke="#fbbf24"></rect>
         <text class="nm" x="200" y="626">stopped</text>
-        <text class="fr" x="200" y="650">暂停(保留路径) · 1Hz</text>
+        <text class="fr" x="200" y="650">任务暂停(pause) · 1Hz</text>
       </g>
 
       <!-- FAILED (Obstacle blocked / stalled) -->
@@ -150,6 +152,11 @@
         <text class="fr" x="1040" y="650">相机掉线(需重启) · 1Hz</text>
       </g>
 
+      <!-- ===== 手柄 B/A 全局规则 ===== -->
+      <rect x="90" y="688" width="1060" height="50" rx="25" fill="#0c2416" stroke="#2f6b45"></rect>
+      <text x="620" y="709" text-anchor="middle" font-size="13.5" font-weight="700" fill="#7ee0a8">手柄 B (/motion_enabled=False) ──▶ 底盘急停：状态保持 running（任务继续、路径保留，永不判 failed）</text>
+      <text x="620" y="729" text-anchor="middle" font-size="13.5" font-weight="700" fill="#7ee0a8">手柄 A (/motion_enabled=True) ──▶ 保持 running 并重新计时：4.0s 内位移 &lt; 0.1m 且速度 &lt; 0.1m/s 才 → failed</text>
+
       <!-- ===== pause 全局规则 ===== -->
       <rect x="350" y="754" width="540" height="46" rx="23" fill="#1a1408" stroke="#5a431a"></rect>
       <text x="620" y="783" text-anchor="middle" font-size="14" font-weight="700" fill="#fbbf24">任意状态 ── /mission/control: "pause" ──▶ stopped（底盘刹停，保留进度）</text>
@@ -157,11 +164,11 @@
 
     <div class="legend">
       <span class="chip"><span class="dot" style="background:var(--idle)"></span>idle 空闲</span>
-      <span class="chip"><span class="dot" style="background:var(--running)"></span>running 运行中</span>
+      <span class="chip"><span class="dot" style="background:var(--running)"></span>running 运行中 (B 急停时保持)</span>
       <span class="chip"><span class="dot" style="background:var(--goal)"></span>goal_reached 本段到达</span>
-      <span class="chip"><span class="dot" style="background:var(--failed)"></span>failed 业务遇阻 (可直接恢复)</span>
+      <span class="chip"><span class="dot" style="background:var(--failed)"></span>failed 业务遇阻 (A 后 4s 无位移)</span>
       <span class="chip"><span class="dot" style="background:var(--error)"></span>error 硬件异常 (拒绝新路径/需重启)</span>
-      <span class="chip"><span class="dot" style="background:var(--stopped)"></span>stopped 暂停 (保留路径)</span>
+      <span class="chip"><span class="dot" style="background:var(--stopped)"></span>stopped 任务暂停 (仅 pause 指令)</span>
     </div>
   </div>
 
@@ -178,13 +185,13 @@
 
         <tr><td><code>running</code></td><td><code>goal_reached</code></td>
           <td>
-            <b>1. 到点判定</b>：机器人中心距离当前段终端点 &lt; <code>segment_arrive_threshold</code> (0.20m)。<br/>
+            <b>1. 到点判定</b>：机器人中心距离当前段终端点 &lt; <code>segment_arrive_threshold</code> (0.45m)。<br/>
             <b>2. 朝向与完成条件（二选一）</b>：
             <ul style="margin:2px 0 0;padding-left:16px">
               <li><b>无朝向 / 楼梯上</b>：直接刹停并触发。</li>
-              <li><b>有终点朝向</b>：进入原地踏步调姿（状态保持 <code>running</code>），满足以下任一条件时正式触发：
+              <li><b>有终点朝向</b>：距离 ≤ <code>terminal_align_enter_dist</code> (0.50m) 时进入原地踏步调姿（状态保持 <code>running</code>），满足以下任一条件时正式触发：
                 <br/>· 偏航角误差 $\le 15^\circ$（<code>terminal_heading_tol = 0.26rad</code>，稳定 2 帧）；
-                <br/>· 原地踏步位移漂移 &gt; <code>0.40m</code>（防漂移保护强退）；
+                <br/>· 原地踏步位移漂移 &gt; <code>0.60m</code>（<code>terminal_align_abort_dist</code>，防漂移保护强退）；
                 <br/>· 调姿耗时 &gt; <code>5.0s</code>（超时看门狗保护强退）。
               </li>
             </ul>
@@ -196,7 +203,9 @@
           <td>瞬发后立刻变至 idle 空闲就绪（构成单向闭环三角）；在 idle 状态以 1Hz 广播心跳持续监听新路径，一旦收到新路径立即进入 running 推进</td></tr>
 
         <tr><td><code>running</code></td><td><code>failed</code></td>
-          <td>由于前方障碍物完全封堵，连续 <code>blocked_timeout</code>(4.0s) 进尺 &lt; 0.1m 且线速度 &lt; 0.1m/s</td>
+          <td>由于前方障碍物完全封堵，连续 <code>blocked_timeout</code>(4.0s) 进尺 &lt; 0.1m 且线速度 &lt; 0.1m/s。<br/>
+            该 4.0s 窗口在<b>手柄 A 恢复后重新开始计时</b>；手柄 B 急停期间窗口持续清零，不会计时。
+          </td>
           <td>主动置零刹停避免死磕障碍物。<br/><b>脱困恢复</b>：上层重新下发绕行新路径或下发 <code>resume</code> 即可直接恢复 <code>running</code>，无需重启</td></tr>
 
         <tr><td><code>failed</code></td><td><code>running</code></td>
@@ -207,12 +216,20 @@
           <td>ZED 深度相机连续丢帧超时 &gt; <code>camera_timeout</code> (2.0s)</td>
           <td>主动紧急制动刹停，防止无视觉盲跑撞击。<br/><b>不可自动恢复</b>：此时下发新路径会被主动拒绝，需检查硬件连接或重启机载终端</td></tr>
 
+        <tr><td><code>running</code></td><td><code>running</code>（状态不变）</td>
+          <td>手柄 <b>B</b>：<code>/motion_enabled=False</code>（底盘急停）</td>
+          <td>底盘立即刹停（<code>/cmd_vel=0</code>），<b>任务状态与上报保持 <code>running</code></b>、路径/目标保留在内存。<br/>急停期间停滞检测器每周期清零，绝不进入 <code>failed</code>；解除急停需按 A</td></tr>
+
+        <tr><td><code>running</code>（急停中）</td><td><code>running</code>（状态不变）</td>
+          <td>手柄 <b>A</b>：<code>/motion_enabled=True</code>（解除急停）</td>
+          <td>解除暂停闩锁并重置停滞检测窗口，回到 <code>running</code> 继续原任务。<br/><b>此后 4.0s 内</b>若位移 &lt; 0.1m 且速度 &lt; 0.1m/s，才判定为 <code>failed</code></td></tr>
+
         <tr><td>任意状态</td><td><code>stopped</code></td>
-          <td>收到指令 <code>/mission/control: "pause"</code> 或手柄 ABORT</td>
+          <td>收到指令 <code>/mission/control: "pause"</code>（手柄 B 已不再进入 stopped）</td>
           <td>主动刹停底盘，<b>自动在内存中保留未跑完路径与进度</b></td></tr>
 
         <tr><td><code>stopped</code></td><td><code>running</code></td>
-          <td>收到指令 <code>/mission/control: "resume"</code> 且内存中有有效路径</td>
+          <td>收到指令 <code>/mission/control: "resume"</code> 或手柄 A，且内存中有有效路径</td>
           <td>若暂停期间收到过新路径则按新路径开始推进；若无新路径则从当前物理位置继续走完旧路径剩余路段</td></tr>
       </tbody>
     </table>
@@ -226,10 +243,10 @@
       </thead>
       <tbody>
         <tr><td><code>idle</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>无路径任务，等待调度</td></tr>
-        <tr><td><code>running</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>自主避障循迹中</td></tr>
+        <tr><td><code>running</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>自主避障循迹中；手柄 B 急停期间仍持续上报 <code>running</code></td></tr>
         <tr><td><code>goal_reached</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>到达本段终点，等待下一段</td></tr>
-        <tr><td><code>failed</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>遇阻死锁（非致命，可脱困）</td></tr>
-        <tr><td><code>stopped</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>已暂停（路径保留在内存中）</td></tr>
+        <tr><td><code>failed</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>遇阻死锁（仅在线速度门控打开、A 恢复后 4s 无位移时判定；非致命，可脱困）</td></tr>
+        <tr><td><code>stopped</code></td><td><code>[]</code> (原生空数组)</td><td><code>"[]"</code>, <code>""</code></td><td>任务暂停（仅 <code>/mission/control: "pause"</code> 触发，路径保留在内存中）</td></tr>
         <tr><td><code>error</code></td><td><code>["zed_camera_lost"]</code></td><td><code>'["zed_camera_lost"]'</code>, <code>"zed_camera_lost"</code></td><td>视觉传感器掉线（致命硬件故障）</td></tr>
       </tbody>
     </table>
@@ -250,12 +267,19 @@
           <li><b><code>error</code></b>：硬件层面的致命传感器丢失，<code>msgs</code> 为 <code>"zed_camera_lost"</code>。控制器主动拒绝新路径以保障安全，需重启或排查连线。</li>
         </ul>
       </li>
+      <li><b>手柄急停（B / A）与失败判定的关系</b>：
+        <ul>
+          <li><b>B（<code>/motion_enabled=False</code>）</b>：属于底盘急停而非任务中止。控制器立即置零速度并保留路径/目标，<b>导航状态保持 <code>running</code> 并按 1Hz 继续上报 running</b>。只要速度门控关闭，停滞检测窗口每周期清零且 <code>failed</code> 转移被显式拒绝，因此急停多久都不会被判为 <code>failed</code>。</li>
+          <li><b>A（<code>/motion_enabled=True</code>）</b>：清除暂停闩锁、按当前位姿对齐路径进度，并<b>重新开始 4.0s 停滞计时</b>。此后若机器狗 4.0s 内位移 &lt; 0.1m 且速度 &lt; 0.1m/s，才正常进入 <code>failed</code>。</li>
+          <li><b>与 mission pause 的区别</b>：<code>stopped</code> 只由 <code>/mission/control: "pause"</code> 产生，意味着任务被显式暂停；手柄 B 不产生 <code>stopped</code>，上层业务可据此认为任务仍在进行。</li>
+        </ul>
+      </li>
       <li><b>心跳与瞬发</b>：未变化时以 1Hz 周期广播；状态发生跳变时当个控制循环瞬时毫秒级发布。</li>
-      <li><b>底盘总闸自动解锁</b>：<code>rl_nav_controller</code> 启动且定位就绪后，自动发布 <code>/startNavi: true</code> 与 <code>/motion_enabled: true</code> 解锁底盘电机。</li>
+      <li><b>底盘总闸自动解锁</b>：<code>rl_nav_controller</code> 启动且定位就绪后，自动发布 <code>/startNavi: true</code>；<code>/motion_enabled</code> 不再自动发 <code>true</code>，只由手柄 A 发布（退出时 <code>/startNavi</code> 发 <code>false</code>）。</li>
       <li><b>终点姿态/航向对齐与漂移看门狗机制</b>：
         <ul>
-          <li><b>时序解耦与状态保持</b>：行进全过程由 RL 策略与自适应前瞻自主避障导航；到达终点坐标（&lt; 0.20m）后，才切入传统带死区补偿与限幅的 P 控制器进行原地踏步调姿，此时外部状态严格保持 <code>running</code>，保证上层业务流程不会过早提前执行后续动作。</li>
-          <li><b>三重退出安全防护</b>：角度误差收敛至 $\le 15^\circ$（<code>terminal_heading_tol = 0.26rad</code>，稳定 2 帧）判定达成；原地踏步位移漂移超过 40cm（<code>0.40m</code>）立即刹车强行完成；超时 5.0s 看门狗退出防无限打转。</li>
+          <li><b>时序解耦与状态保持</b>：行进全过程由 RL 策略与自适应前瞻自主避障导航；到达终点坐标（&lt; 0.45m）后，且距终点 ≤ <code>terminal_align_enter_dist</code> (0.50m) 时，才切入传统带死区补偿与限幅的 P 控制器进行原地踏步调姿，此时外部状态严格保持 <code>running</code>，保证上层业务流程不会过早提前执行后续动作。</li>
+          <li><b>三重退出安全防护</b>：角度误差收敛至 $\le 15^\circ$（<code>terminal_heading_tol = 0.26rad</code>，稳定 2 帧）判定达成；原地踏步位移漂移超过 60cm（<code>terminal_align_abort_dist = 0.60m</code>）立即刹车强行完成；超时 5.0s 看门狗退出防无限打转。</li>
           <li><b>楼梯禁转保护</b>：若到点时机器狗仍处于楼梯上（<code>is_stair_down</code> 或 <code>is_stair_up</code> 为 True），严格禁止原地大幅自转，直接刹停完成，防止阶梯踩空摔落。</li>
         </ul>
       </li>
